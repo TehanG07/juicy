@@ -36,7 +36,7 @@ def find_secrets(content):
         'API_KEY': r'(?i)(api[_-]?key|access[_-]?key|auth[_-]?token|x-api-key)[\'"=:\s>]{1,3}([a-z0-9A-Z\-\._]{16,})',
         'PASSWORD': r'(?i)(password|pass|pwd)[\'"=:\s>]{1,3}([a-zA-Z0-9@#\$%\^&\+=!*\-_\.,]{6,})',
         'USERNAME': r'(?i)(username|user|login)[\'"=:\s>]{1,3}([a-zA-Z0-9_\-\.]{3,50})',
-        'EMAIL': r'([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)',
+        'EMAIL': r'(?<!//)(?<![a-zA-Z0-9])([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)',
         'JWT': r'(eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)',
         'ENCODED': r'["\']([A-Za-z0-9+/=]{20,})["\']',
         'DB_URI': r'(?i)(mysql|mongodb|postgres|sql):\/\/[a-z0-9:_@\-\.\/]+',
@@ -52,12 +52,10 @@ def find_secrets(content):
     for name, pattern in patterns.items():
         matches = re.findall(pattern, content)
         for match in matches:
-            if isinstance(match, tuple):
-                value = match[-1].strip()
-            else:
-                value = match.strip()
-            if verify_secret(name, value):
-                results.append((name, value))
+            value = match[-1].strip() if isinstance(match, tuple) else match.strip()
+            if name != "EMAIL" and not verify_secret(name, value):
+                continue
+            results.append((name, value))
     return list(set(results))
 
 def find_endpoints(content):
@@ -77,14 +75,14 @@ def extract_js_json_links(base_url, html):
     soup = BeautifulSoup(html, "html.parser")
     found_links = []
 
-    for tag in soup.find_all(["script", "link"], src=True):
+    for tag in soup.find_all(["script"], src=True):
         link = urljoin(base_url, tag.get("src"))
-        if ".js" in link or "/js" in link:
+        if link.endswith(".js"):
             found_links.append(link)
 
     for tag in soup.find_all("link", href=True):
         link = urljoin(base_url, tag.get("href"))
-        if ".json" in link or "/json" in link:
+        if link.endswith(".json"):
             found_links.append(link)
 
     return list(set(found_links))
