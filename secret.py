@@ -1,359 +1,405 @@
-#!/usr/bin/env python3
-"""
-Secret-Killer v2.0
-Author: TehanG07 (cybereye) — improved version
-Multi-Engine Sensitive Info Scanner for URLs / local JS/JSON files
-"""
-
-import re
-import os
-import sys
-import json
-import time
-import argparse
-import requests
-import logging
+import requests, re, math, json, threading, base64, time
+from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Any
+from tkinter import *
+from tkinter import ttk, filedialog, messagebox
 
-# Optional imports
-try:
-    from detect_secrets.core.scan import scan_file as ds_scan_file
-except Exception:
-    ds_scan_file = None
+# ================= CONFIGURATION & CONSTANTS ================= #
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+TIMEOUT = 15
+THREADS = 15  # Increased for aggressive crawling
 
-# ------- Configuration -------
-REQUEST_TIMEOUT = 12
-MAX_WORKERS = 8
-USER_AGENT = "Mozilla/5.0 (Secret-Killer/2.0)"
-OUTPUT_TEXT = "secret-killer_results.txt"
-OUTPUT_JSON = "secret-killer_results.json"
-
-# ------- Logging -------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
-
-# ------- Patterns -------
-# Basic identifiers
-PATTERNS = {
-    "Username": re.compile(r'["\']?(?:username|user_name|user|usr|account)["\']?\s*[:=]\s*["\']?([A-Za-z0-9._-]{3,64})["\']?', re.I),
-    "Email": re.compile(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'),
-    # Mobile: generic + Indian numbers (10 digits, optional +91, separators)
-    "Phone": re.compile(r'(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s]?)?\d{6,12}'),
-    # DB credentials common keys
-    "DB_User": re.compile(r'["\']?(?:db[_-]?user|dbuser|database[_-]?user|username)["\']?\s*[:=]\s*["\']([^"\']{1,80})["\']?', re.I),
-    "DB_Pass": re.compile(r'["\']?(?:db[_-]?pass|db[_-]?password|database[_-]?password|passwd)["\']?\s*[:=]\s*["\']([^"\']{1,200})["\']?', re.I),
-    # SMTP/FTP
-    "SMTP_User": re.compile(r'["\']?(?:smtp[_-]?user|ftp[_-]?user|mail_user)["\']?\s*[:=]\s*["\']([^"\']+)["\']?', re.I),
-    "SMTP_Pass": re.compile(r'["\']?(?:smtp[_-]?pass|ftp[_-]?pass|mail_pass)["\']?\s*[:=]\s*["\']([^"\']+)["\']?', re.I),
+SEVERITY_COLORS = {
+    "INFO": "#212121",      # Dark Grey for informational endpoints
+    "LOW": "#4caf50",       # Green
+    "MEDIUM": "#ff9800",    # Orange
+    "HIGH": "#f44336",      # Red
+    "CRITICAL": "#b71c1c"   # Deep Red
 }
 
-# Tokens & keys (a curated set of common formats)
-TOKEN_PATTERNS = {
-    "JWT": re.compile(r'eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9._-]{10,}\.[a-zA-Z0-9._-]{10,}'),
-    "AWS_AccessKey": re.compile(r'AKIA[0-9A-Z]{16}'),
-    "AWS_SecretKey": re.compile(r'(?i)aws_secret_access_key["\']?\s*[:=]\s*["\']?([A-Za-z0-9/+=]{40,})["\']?'),
-    "Google_API_Key": re.compile(r'AIza[0-9A-Za-z\-_]{35}'),
-    "Stripe_Key": re.compile(r'sk_live_[0-9a-zA-Z]{24,}|' r'sk_test_[0-9a-zA-Z]{24,}'),
-    "Slack_Token": re.compile(r'xox[baprs]-[0-9a-zA-Z]{10,}'),
-    "Firebase_API_Key": re.compile(r'["\']?apiKey["\']?\s*[:=]\s*["\']([A-Za-z0-9:\-_]{20,40})["\']', re.I),
-    "Firebase_Config": re.compile(r'firebase(?:Config)?\s*[:=]\s*\{', re.I),
-    "BasicAuth": re.compile(r'["\']?[A-Za-z0-9._%+-]+:[^\s"\'@]{1,80}["\']?'),  # may produce false positives
-    "Bearer": re.compile(r'Bearer\s+[A-Za-z0-9\-\._~\+/]+=*'),
-    "GenericToken": re.compile(r'["\']?(?:token|access[_-]?token|auth[_-]?token|secret|api[_-]?key|client[_-]?secret)["\']?\s*[:=]\s*["\']([A-Za-z0-9\-\._~\+/=]{8,200})["\']?', re.I),
+# STRICT IGNORE LIST: These values trigger immediate discard if found in matches
+IGNORE_LIST = [
+    "example", "sample", "test", "dummy", "fake", "xxxx", "xxxxx",
+    "changeme", "your_api_key", "your_email", "insert_here", "localhost",
+    "127.0.0.1", "development", "staging", "null", "undefined", "false"
+]
+
+# ================= UTILITIES & VALIDATION ================= #
+def get_entropy(s):
+    """Calculates Shannon entropy to detect high-information strings like keys."""
+    if not s: return 0
+    s = s.strip()
+    # Normalize to avoid length bias
+    entropy = 0
+    for x in set(s):
+        p_x = float(s.count(x)) / len(s)
+        if p_x > 0:
+            entropy -= p_x * math.log(p_x, 2)
+    return entropy
+
+def luhn_checksum(card_number):
+    """Validates Credit Card using Luhn algorithm."""
+    r = [int(x) for x in card_number[::-1]]
+    return (sum(r[0::2]) + sum(sum(divmod(d*2,10)) for d in r[1::2])) % 10 == 0
+
+def decode_jwt(token):
+    """Attempts to decode JWT payload to inspect claims without verifying signature."""
+    try:
+        parts = token.split('.')
+        if len(parts) != 3: return None
+        # Add padding if necessary
+        payload_b64 = parts[1] + '=' * (-len(parts[1]) % 4)
+        payload = json.loads(base64.b64decode(payload_b64))
+        return payload
+    except:
+        return None
+
+def check_context(match_text, source_snippet):
+    """
+    Advanced False Positive Reduction:
+    Checks if the match appears in a context that implies it is a variable assignment,
+    JSON key, or configuration value.
+    """
+    match_lower = match_text.lower()
+    snippet_lower = source_snippet.lower()
     
-    # Additional API Keys and Secrets
-    "ABTasty_API_Key": re.compile(r'abt_[A-Za-z0-9]{32}', re.I),
-    "Algolia_API_Key": re.compile(r'["\']?(?:algolia[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Amplitude_API_Key": re.compile(r'["\']?(?:amplitude[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([a-f0-9]{32})["\']', re.I),
-    "Asana_Access_Token": re.compile(r'["\']?(?:asana[_-]?access[_-]?token|access[_-]?token)["\']?\s*[:=]\s*["\']([0-9]/[a-f0-9]{16})["\']', re.I),
-    "Azure_Application_Insights_APP_ID": re.compile(r'["\']?(?:azure[_-]?app[_-]?id|app[_-]?id)["\']?\s*[:=]\s*["\']([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})["\']', re.I),
-    "Azure_Application_Insights_API_Key": re.compile(r'["\']?(?:azure[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([a-f0-9]{32})["\']', re.I),
-    "Bazaarvoice_Passkey": re.compile(r'["\']?(?:bazaarvoice[_-]?passkey|passkey)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{16})["\']', re.I),
-    "Bing_Maps_API_Key": re.compile(r'["\']?(?:bing[_-]?maps[_-]?api[_-]?key|maps[_-]?api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{32})["\']', re.I),
-    "Bitly_Access_Token": re.compile(r'["\']?(?:bit\.ly[_-]?access[_-]?token|access[_-]?token)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{32})["\']', re.I),
-    "Branchio_Key": re.compile(r'["\']?(?:branch\.io[_-]?key|key[_-]?live|key[_-]?test)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{32})["\']', re.I),
-    "Branchio_Secret": re.compile(r'["\']?(?:branch\.io[_-]?secret|secret[_-]?live|secret[_-]?test)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{32})["\']', re.I),
-    "BrowserStack_Access_Key": re.compile(r'["\']?(?:browserstack[_-]?access[_-]?key|access[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{20})["\']', re.I),
-    "Buildkite_Access_Token": re.compile(r'["\']?(?:buildkite[_-]?access[_-]?token|access[_-]?token)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{20})["\']', re.I),
-    "ButterCMS_API_Key": re.compile(r'["\']?(?:buttercms[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Calendly_API_Key": re.compile(r'["\']?(?:calendly[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Contentful_Access_Token": re.compile(r'["\']?(?:contentful[_-]?access[_-]?token|access[_-]?token)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{43})["\']', re.I),
-    "CircleCI_Access_Token": re.compile(r'["\']?(?:circleci[_-]?access[_-]?token|access[_-]?token)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{40})["\']', re.I),
-    "Cloudflare_API_Key": re.compile(r'["\']?(?:cloudflare[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{37})["\']', re.I),
-    "Cypress_Record_Key": re.compile(r'["\']?(?:cypress[_-]?record[_-]?key|record[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "DataDog_API_Key": re.compile(r'["\']?(?:datadog[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Delighted_API_Key": re.compile(r'["\']?(?:delighted[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "DeviantArt_Access_Token": re.compile(r'["\']?(?:deviant[_-]?art[_-]?access[_-]?token|access[_-]?token)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "DeviantArt_Secret": re.compile(r'["\']?(?:deviant[_-]?art[_-]?secret|secret)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Dropbox_API": re.compile(r'["\']?(?:dropbox[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{15})["\']', re.I),
-    "Dropbox_Access_Token": re.compile(r'["\']?(?:dropbox[_-]?access[_-]?token|access[_-]?token)["\']?\s*[:=]\s*["\'](sl\.[A-Za-z0-9_-]{135})["\']', re.I),
-    "Facebook_Access_Token": re.compile(r'EAACEdEose0cBA[0-9A-Za-z]+'),
-    "Facebook_AppSecret": re.compile(r'["\']?(?:facebook[_-]?app[_-]?secret|app[_-]?secret)["\']?\s*[:=]\s*["\']([a-f0-9]{32})["\']', re.I),
-    "Firebase_Cloud_Messaging_Server_Key": re.compile(r'["\']?(?:fcm[_-]?server[_-]?key|server[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{171})["\']', re.I),
-    "FreshDesk_API_Key": re.compile(r'["\']?(?:freshdesk[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{16})["\']', re.I),
-    "GitHub_Client_ID": re.compile(r'["\']?(?:github[_-]?client[_-]?id|client[_-]?id)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{20})["\']', re.I),
-    "GitHub_Client_Secret": re.compile(r'["\']?(?:github[_-]?client[_-]?secret|client[_-]?secret)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{40})["\']', re.I),
-    "GitHub_Private_SSH_Key": re.compile(r'-----BEGIN RSA PRIVATE KEY-----'),
-    "GitHub_Token": re.compile(r'ghp_[A-Za-z0-9]{36}'),
-    "GitLab_Personal_Access_Token": re.compile(r'glpat-[A-Za-z0-9_-]{20}'),
-    "GitLab_Runner_Registration_Token": re.compile(r'gr134[0-9a-z]{24}'),
-    "Google_Cloud_Service_Account_Credentials": re.compile(r'"type":\s*"service_account"'),
-    "Google_Recaptcha_Site_Key": re.compile(r'["\']?(?:recaptcha[_-]?site[_-]?key|site[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{40})["\']', re.I),
-    "Google_Recaptcha_Secret_Key": re.compile(r'["\']?(?:recaptcha[_-]?secret[_-]?key|secret[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{40})["\']', re.I),
-    "Grafana_Access_Token": re.compile(r'["\']?(?:grafana[_-]?access[_-]?token|access[_-]?token)["\']?\s*[:=]\s*["\'](eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9._-]{10,}\.[A-Za-z0-9._-]{10,})["\']', re.I),
-    "HelpScout_OAUTH": re.compile(r'["\']?(?:help[_-]?scout[_-]?oauth|oauth)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{64})["\']', re.I),
-    "Heroku_API_Key": re.compile(r'["\']?(?:heroku[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["\']', re.I),
-    "HubSpot_API_Key": re.compile(r'["\']?(?:hubspot[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{36})["\']', re.I),
-    "Infura_API_Key": re.compile(r'["\']?(?:infura[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Instagram_Access_Token": re.compile(r'["\']?(?:instagram[_-]?access[_-]?token|access[_-]?token)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{190})["\']', re.I),
-    "Instagram_Basic_Display_API": re.compile(r'["\']?(?:instagram[_-]?basic[_-]?display[_-]?api|api)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{190})["\']', re.I),
-    "Instagram_Graph_API": re.compile(r'["\']?(?:instagram[_-]?graph[_-]?api|api)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{190})["\']', re.I),
-    "Ipstack_API_Key": re.compile(r'["\']?(?:ipstack[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Iterable_API_Key": re.compile(r'["\']?(?:iterable[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "JumpCloud_API_Key": re.compile(r'["\']?(?:jumpcloud[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Keenio_API_Key": re.compile(r'["\']?(?:keen\.io[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "LinkedIn_OAUTH": re.compile(r'["\']?(?:linkedin[_-]?oauth|oauth)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{64})["\']', re.I),
-    "Lokalise_API_Key": re.compile(r'["\']?(?:lokalise[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Loqate_API_Key": re.compile(r'["\']?(?:loqate[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "MailChimp_API_Key": re.compile(r'["\']?(?:mailchimp[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32}-us[0-9]{1,2})["\']', re.I),
-    "MailGun_Private_Key": re.compile(r'["\']?(?:mailgun[_-]?private[_-]?key|private[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Mapbox_API_Key": re.compile(r'["\']?(?:mapbox[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\'](pk\.[A-Za-z0-9]{41})["\']', re.I),
-    "Microsoft_Azure_Tenant": re.compile(r'["\']?(?:azure[_-]?tenant|tenant)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{36})["\']', re.I),
-    "Microsoft_Shared_Access_Signatures": re.compile(r'["\']?(?:sas|shared[_-]?access[_-]?signature)["\']?\s*[:=]\s*["\']([A-Za-z0-9+/]{43}={0,2})["\']', re.I),
-    "Microsoft_Teams_Webhook": re.compile(r'https://outlook\.office\.com/webhook/[A-Za-z0-9-]{32}/IncomingWebhook/[A-Za-z0-9-]{32}/[A-Za-z0-9-]{32}'),
-    "New_Relic_Personal_API_Key": re.compile(r'["\']?(?:new[_-]?relic[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\'](NRAK-[A-Za-z0-9]{27})["\']', re.I),
-    "New_Relic_REST_API_Key": re.compile(r'["\']?(?:new[_-]?relic[_-]?rest[_-]?api[_-]?key|rest[_-]?api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{64})["\']', re.I),
-    "NPM_Token": re.compile(r'["\']?(?:npm[_-]?token|token)["\']?\s*[:=]\s*["\'](npm_[A-Za-z0-9_-]{36})["\']', re.I),
-    "OpsGenie_API_Key": re.compile(r'["\']?(?:opsgenie[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Pagerduty_API_Token": re.compile(r'["\']?(?:pagerduty[_-]?api[_-]?token|api[_-]?token)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Paypal_Client_ID": re.compile(r'["\']?(?:paypal[_-]?client[_-]?id|client[_-]?id)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Paypal_Secret_Key": re.compile(r'["\']?(?:paypal[_-]?secret[_-]?key|secret[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Pendo_Integration_Key": re.compile(r'["\']?(?:pendo[_-]?integration[_-]?key|integration[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "PivotalTracker_API_Token": re.compile(r'["\']?(?:pivotaltracker[_-]?api[_-]?token|api[_-]?token)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Razorpay_API_Key": re.compile(r'["\']?(?:razorpay[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Razorpay_Secret_Key": re.compile(r'["\']?(?:razorpay[_-]?secret[_-]?key|secret[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Salesforce_API_Key": re.compile(r'["\']?(?:salesforce[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "SauceLabs_Username": re.compile(r'["\']?(?:saucelabs[_-]?username|username)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{32})["\']', re.I),
-    "SauceLabs_Access_Key": re.compile(r'["\']?(?:saucelabs[_-]?access[_-]?key|access[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9_-]{32})["\']', re.I),
-    "SendGrid_API_Token": re.compile(r'["\']?(?:sendgrid[_-]?api[_-]?token|api[_-]?token)["\']?\s*[:=]\s*["\'](SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43})["\']', re.I),
-    "Shodan_API_Key": re.compile(r'["\']?(?:shodan[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "Slack_Webhook": re.compile(r'https://hooks\.slack\.com/services/[A-Z0-9]{9}/[A-Z0-9]{9}/[A-Za-z0-9]{24}'),
-    "Sonarcloud_API_Token": re.compile(r'["\']?(?:sonarcloud[_-]?api[_-]?token|api[_-]?token)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{40})["\']', re.I),
-    "Spotify_Access_Token": re.compile(r'["\']?(?:spotify[_-]?access[_-]?token|access[_-]?token)["\']?\s*[:=]\s*["\'](BQ[A-Za-z0-9_-]{130})["\']', re.I),
-    "Square_Access_Token": re.compile(r'["\']?(?:square[_-]?access[_-]?token|access[_-]?token)["\']?\s*[:=]\s*["\'](EAAA[AE][A-Za-z0-9_-]{60})["\']', re.I),
-    "Telegram_Bot_API_Token": re.compile(r'["\']?(?:telegram[_-]?bot[_-]?api[_-]?token|bot[_-]?api[_-]?token)["\']?\s*[:=]\s*["\']([0-9]{8,10}:[A-Za-z0-9_-]{35})["\']', re.I),
-    "Travis_CI_API_Token": re.compile(r'["\']?(?:travis[_-]?ci[_-]?api[_-]?token|api[_-]?token)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{22})["\']', re.I),
-    "Twilio_Account_SID": re.compile(r'["\']?(?:twilio[_-]?account[_-]?sid|account[_-]?sid)["\']?\s*[:=]\s*["\'](AC[a-z0-9]{32})["\']', re.I),
-    "Twilio_Auth_Token": re.compile(r'["\']?(?:twilio[_-]?auth[_-]?token|auth[_-]?token)["\']?\s*[:=]\s*["\']([a-f0-9]{32})["\']', re.I),
-    "Twitter_API_Secret": re.compile(r'["\']?(?:twitter[_-]?api[_-]?secret|api[_-]?secret)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{44})["\']', re.I),
-    "Twitter_Bearer_Token": re.compile(r'["\']?(?:twitter[_-]?bearer[_-]?token|bearer[_-]?token)["\']?\s*[:=]\s*["\'](AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D[A-Za-z0-9%]{22})["\']', re.I),
-    "Visual_Studio_App_Center_API_Token": re.compile(r'["\']?(?:visual[_-]?studio[_-]?app[_-]?center[_-]?api[_-]?token|api[_-]?token)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{64})["\']', re.I),
-    "WakaTime_API_Key": re.compile(r'["\']?(?:wakatime[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "WeGlot_Api_Key": re.compile(r'["\']?(?:weglot[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "WPEngine_API_Key": re.compile(r'["\']?(?:wpengine[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
-    "YouTube_API_Key": re.compile(r'AIza[0-9A-Za-z\-_]{35}'),  # Same as Google_API_Key
-    "Zapier_Webhook_Token": re.compile(r'https://hooks\.zapier\.com/hooks/catch/[A-Za-z0-9]{32}/[A-Za-z0-9]{32}/'),
-    "Zendesk_Access_Token": re.compile(r'["\']?(?:zendesk[_-]?access[_-]?token|access[_-]?token)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{64})["\']', re.I),
-    "Zendesk_API_Key": re.compile(r'["\']?(?:zendesk[_-]?api[_-]?key|api[_-]?key)["\']?\s*[:=]\s*["\']([A-Za-z0-9]{32})["\']', re.I),
+    # 1. Hard ignore
+    if any(x in match_lower for x in IGNORE_LIST):
+        return False
+
+    # 2. Contextual Heuristics
+    # Look for assignment keywords nearby (within 50 chars)
+    idx = snippet_lower.find(match_lower)
+    if idx == -1: return True # Fallback to true if context extraction fails
+    
+    context_window = snippet_lower[max(0, idx-50):idx+len(match_lower)+50]
+    
+    # Positive indicators (likely a real key)
+    if any(k in context_window for k in ["key", "secret", "token", "pass", "auth", "api", "credential", "env", "config"]):
+        return True
+        
+    # Negative indicators (likely an example, ID, or comment)
+    if any(k in context_window for k in ["//", "#", "<!--", "example", "sample", "placeholder", "format", "e.g."]):
+        return False
+
+    return True
+
+# ================= SIGNATURE DATABASE ================= #
+# Tuple structure: (Regex, Severity, "Description")
+PATTERNS = {
+    # -------- CLOUD & INFRA --------
+    "AWS Access Key": (r'(?i)\b(AKIA[0-9A-Z]{16})\b', "CRITICAL", "AWS Access Key ID"),
+    "AWS Secret Key": (r'(?i)aws(.{0,20})?[\'\"]?secret[\'\"]?(.{0,20})?[=:\s]+[\'\"]?([A-Za-z0-9/+=]{40})[\'\"]?', "CRITICAL", "AWS Secret Access Key"),
+    "Google API Key": (r'\b(AIza[0-9A-Za-z\-_]{35})\b', "HIGH", "Google Cloud API Key"),
+    "Google Cloud OAuth": (r'\b([0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com)\b', "HIGH", "GCP OAuth Client ID"),
+    "Firebase DB": (r'\b(firebaseio\.com|firebase\.app)\b', "MEDIUM", "Firebase Database URL"),
+    "Azure Key": (r'(?i)azure(.{0,20})?[\'\"]?(key|secret|value)[\'\"]?(.{0,20})?[=:\s]+[\'\"]?([A-Za-z0-9/+=]{32,})[\'\"]?', "HIGH", "Azure Storage/Key"),
+
+    # -------- PAYMENT & FINTECH --------
+    "Stripe Live Key": (r'\b(sk_live_[0-9a-zA-Z]{24})\b', "CRITICAL", "Stripe Live Secret Key"),
+    "Stripe Publishable": (r'\b(pk_live_[0-9a-zA-Z]{24})\b', "HIGH", "Stripe Live Publishable Key"),
+    "PayPal Braintree": (r'\b(access_token\$production\$[0-9a-z]{16}\$[0-9a-f]{32})\b', "CRITICAL", "Braintree Access Token"),
+
+    # -------- DEVOPS & VERSION CONTROL --------
+    "GitHub Token": (r'\b(gh[pousr]_[A-Za-z0-9_]{36,})\b', "CRITICAL", "GitHub Personal/OAuth Token"),
+    "GitLab Token": (r'\b(glpat-[A-Za-z0-9\-]{20,})\b', "CRITICAL", "GitLab Personal Access Token"),
+    "Slack Token": (r'\b(xox[baprs]-[0-9]{12}-[0-9]{12}-[0-9A-Za-z]{24})\b', "CRITICAL", "Slack Bot/User Token"),
+    "Jira Token": (r'\b([0-9]{26}@[A-Z0-9]{12})\b', "HIGH", "Atlassian API Token"),
+
+    # -------- DATABASES --------
+    "Mongo URI": (r'\b(mongodb(\+srv)?:\/\/[^\s\'"<>{},|\\^`]{10,})\b', "CRITICAL", "MongoDB Connection String"),
+    "Postgres URI": (r'\b(postgres(ql)?:\/\/[^\s\'"<>{},|\\^`]{10,})\b', "CRITICAL", "PostgreSQL Connection String"),
+    "MySQL URI": (r'\b(mysql:\/\/[^\s\'"<>{},|\\^`]{10,})\b', "CRITICAL", "MySQL Connection String"),
+    "Redis URI": (r'\b(redis:\/\/[^\s\'"<>{},|\\^`]{10,})\b', "CRITICAL", "Redis Connection String"),
+
+    # -------- AUTH TOKENS --------
+    "Bearer Token": (r'\b(Bearer\s+[A-Za-z0-9\-._~+/]+=*)\b', "HIGH", "Generic Bearer Authorization"),
+    "JWT Token": (r'\b(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+)\b', "HIGH", "JSON Web Token"),
+    "OAuth Access": (r'\b(ya29\.[0-9A-Za-z\-_]+)\b', "HIGH", "Google OAuth2 Token"),
+    
+    # -------- GENERAL SECRETS --------
+    "Generic API Key": (r'\b([A-Za-z0-9]{32})\b', "MEDIUM", "Generic 32-char Key (Entropy Check)"), # Will rely heavily on entropy
+    "Private Key Marker": (r'-----BEGIN [A-Z]+ PRIVATE KEY-----', "CRITICAL", "PEM Private Key Header"),
+    
+    # -------- ENDPOINTS & PATHS (Hidden APIs) --------
+    "GraphQL Endpoint": (r'["\']?(\/graphql\/?)["\']?', "INFO", "GraphQL Endpoint"),
+    "REST API v1": (r'["\']?(\/api\/v1\/[a-z0-9_\-]+)["\']?', "INFO", "REST API v1 Path"),
+    "REST API v2": (r'["\']?(\/api\/v2\/[a-z0-9_\-]+)["\']?', "INFO", "REST API v2 Path"),
+    "Admin Path": (r'["\']?(\/(admin|dashboard|settings|config|console)\/?)["\']?', "MEDIUM", "Admin/Management Path"),
+    "Debug Path": (r'["\']?(\/(debug|test|healthcheck|status)\/?)["\']?', "LOW", "Debug/Monitoring Path"),
+    "S3 Bucket": (r'\b([a-z0-9.-]+\.s3\.amazonaws\.com)\b', "MEDIUM", "AWS S3 Bucket URL"),
+
+    # -------- PII --------
+    "Email Address": (r'\b([a-zA-Z0-9._%+-]+@(?!example\.com)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b', "MEDIUM", "Email Address"),
+    "Credit Card": (r'\b(\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4})\b', "CRITICAL", "Potential Credit Card (Luhn Validated)"),
+    "IP Address": (r'\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b', "LOW", "IP Address Leak"),
+    "Phone Number": (r'(\+?\d{1,3}[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})', "MEDIUM", "Phone Number"),
 }
 
-# Detect common API endpoints (rough)
-ENDPOINT_PATTERN = re.compile(r'(?:"|\')((?:https?:\/\/)?[A-Za-z0-9\-_\.]+(?:\/[A-Za-z0-9\-_\.\/{}:?-]*)+\.(?:php|asp|aspx|json|cgi|js|jsp)|\/api\/[A-Za-z0-9\/_:-]{3,})["\']', re.I)
+# ================= SCANNER ENGINE ================= #
+class RealTargetScanner:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.seen_findings = set() # Global deduplication
+        
+    def process_source(self, source_text, url):
+        findings = []
+        # 1. REGEX SCANNING
+        for name, (pattern, severity, desc) in PATTERNS.items():
+            # Skip scanning for endpoints in HTML body to save noise, do it in JS mostly? 
+            # No, scan everything but let logic filter.
+            for match in re.finditer(pattern, source_text):
+                raw_match = match.group()
+                
+                # Extract specific groups for complex patterns
+                if name == "AWS Secret Key": raw_match = match.group(4)
+                elif name == "AWS Access Key": raw_match = match.group(1)
+                elif name == "Google API Key": raw_match = match.group(1)
+                elif name == "JWT Token": raw_match = match.group(1)
 
-# Script / JSON link extraction
-SCRIPT_SRC_RE = re.compile(r'<script[^>]+src=["\'](.*?)["\']', re.I)
-LINK_HREF_RE = re.compile(r'<link[^>]+href=["\'](.*?)["\']', re.I)
+                value = raw_match.strip('\'"')
+                value_hash = hash(value + name)
+                
+                # DEDUPLICATION
+                if value_hash in self.seen_findings:
+                    continue
+                
+                # VALIDATION
+                if len(value) > 200: continue # Ignore massive blobs
+                
+                # Entropy check for keys
+                if severity in ["CRITICAL", "HIGH"] and "Token" not in name and "Endpoint" not in name:
+                    ent = get_entropy(value)
+                    if len(value) > 10 and ent < 3.0: 
+                        continue # Low entropy long string is likely an ID or sentence
 
-# ------- Helpers -------
-session = requests.Session()
-session.headers.update({"User-Agent": USER_AGENT})
+                # Specific Card Validation
+                if name == "Credit Card":
+                    clean_card = re.sub(r'\D', '', value)
+                    if len(clean_card) < 13 or not luhn_checksum(clean_card):
+                        continue
+                
+                # Context Check
+                if not check_context(value, match.group(0)):
+                    continue
 
-def fetch_url(url: str) -> str:
-    """Fetch content at url, return text (or empty string)."""
-    try:
-        r = session.get(url, timeout=REQUEST_TIMEOUT)
-        r.raise_for_status()
-        return r.text
-    except Exception as e:
-        logging.debug(f"Failed to fetch {url}: {e}")
-        return ""
+                # JWT Logic
+                final_severity = severity
+                if name == "JWT Token":
+                    payload = decode_jwt(value)
+                    if payload:
+                        # Escalate if sensitive claims found
+                        if payload.get('role') == 'admin' or 'email' in payload:
+                            final_severity = "CRITICAL"
+                
+                with self.lock:
+                    self.seen_findings.add(value_hash)
+                
+                findings.append({
+                    "type": desc,
+                    "severity": final_severity,
+                    "value": value,
+                    "url": url
+                })
 
-def is_probable_js_or_json(url: str) -> bool:
-    return url.lower().endswith(".js") or url.lower().endswith(".json") or ".js?" in url or ".json?" in url
+        # 2. SMART JS ENDPOINT EXTRACTION (Beyond Regex)
+        # Look for relative paths used in fetch() calls or URL definitions
+        # Pattern: "/path" or "http://domain/path" inside script-like structures
+        if '.js' in url or '<script' in source_text[:500]:
+            # Extract strings that look like paths
+            path_candidates = re.findall(r'["\']((?:\/[a-zA-Z0-9._-]{2,}){2,})["\']', source_text)
+            for path in path_candidates:
+                if len(path) > 3 and any(x in path for x in ['api', 'v1', 'v2', 'user', 'admin', 'graphql']):
+                    val_hash = hash(path + "endpoint")
+                    if val_hash not in self.seen_findings:
+                        with self.lock:
+                            self.seen_findings.add(val_hash)
+                        findings.append({
+                            "type": "JS API Path",
+                            "severity": "INFO",
+                            "value": path,
+                            "url": url
+                        })
+        
+        return findings
 
-def extract_links(base: str, html: str) -> List[str]:
-    found = set()
-    for m in SCRIPT_SRC_RE.findall(html):
-        found.add(urljoin(base, m))
-    for m in LINK_HREF_RE.findall(html):
-        found.add(urljoin(base, m))
-    # also naive scan for .js/.json urls anywhere
-    for m in re.findall(r'(https?://[^\s"\']+\.(?:js|json)(?:\?[^\s"\']+)?)', html, re.I):
-        found.add(m)
-    return list(found)
-
-def snippet_around(content: str, match_span: tuple, ctx=100):
-    s, e = match_span
-    start = max(0, s - ctx)
-    end = min(len(content), e + ctx)
-    return content[start:end].replace("\n", "\\n")
-
-# ------- Scanning engines -------
-def regex_scans(content: str) -> List[Dict[str, Any]]:
-    results = []
-    for name, pat in PATTERNS.items():
-        for m in pat.finditer(content):
-            results.append({"engine": "regex", "type": name, "secret": m.group(1) if m.groups() else m.group(0), "span": m.span()})
-    for name, pat in TOKEN_PATTERNS.items():
-        for m in pat.finditer(content):
-            # group(1) when we captured, else full match
-            val = m.group(1) if (m.groups() and m.group(1)) else m.group(0)
-            results.append({"engine": "token_regex", "type": name, "secret": val, "span": m.span()})
-    # endpoints
-    for m in ENDPOINT_PATTERN.finditer(content):
-        results.append({"engine": "endpoint_regex", "type": "API_Endpoint", "secret": m.group(1), "span": m.span()})
-    return results
-
-def detect_secrets_scan(tmp_path: str) -> List[Dict[str, Any]]:
-    """Use detect-secrets if available (best-effort)."""
-    if not ds_scan_file:
-        return []
-    try:
-        secrets = ds_scan_file(tmp_path)
-        out = []
-        for s in secrets:
-            try:
-                out.append({"engine": "detect-secrets", "type": getattr(s, "type", "secret"), "secret": s.secret_value or str(s), "span": (0, 0)})
-            except Exception:
-                continue
-        return out
-    except Exception as e:
-        logging.debug("detect-secrets scan failed: %s", e)
-        return []
-
-# ------- Main scanning of single source -------
-def scan_content(source_name: str, content: str) -> List[Dict[str, Any]]:
-    """Scan content and return list of findings with context."""
-    findings = []
-    # regex based findings
-    findings += regex_scans(content)
-    # detect-secrets findings (write to tmp file)
-    if ds_scan_file:
+    def scan_target(self, url):
+        results = []
         try:
-            import tempfile
-            with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", suffix=".txt") as tf:
-                tf.write(content)
-                tmp_path = tf.name
-            findings += detect_secrets_scan(tmp_path)
-            try: os.remove(tmp_path)
-            except: pass
-        except Exception as e:
-            logging.debug("tmp/detect-secrets error: %s", e)
-    # attach snippet for each finding
-    for f in findings:
-        try:
-            f["snippet"] = snippet_around(content, f.get("span", (0,0)), ctx=80)
-        except Exception:
-            f["snippet"] = ""
-        f["source"] = source_name
-    return findings
-
-# ------- Worker for a single URL/file -------
-def process_source(src: str) -> Dict[str, Any]:
-    """Given a URL or local file path, fetch and scan it plus linked JS/JSON files (if URL)."""
-    logging.info("Processing: %s", src)
-    result = {"source": src, "timestamp": time.time(), "findings": []}
-    content = ""
-    is_url = src.startswith("http://") or src.startswith("https://")
-    if is_url:
-        content = fetch_url(src)
-        # scan main page
-        result["findings"] += scan_content(src, content)
-        # discover linked js/json
-        links = extract_links(src, content)
-        # filter and fetch likely js/json only
-        to_fetch = [l for l in links if is_probable_js_or_json(l)]
-        # fetch those concurrently (but limited)
-        with ThreadPoolExecutor(max_workers=6) as ex:
-            futures = {ex.submit(fetch_url, l): l for l in to_fetch}
-            for fut in as_completed(futures):
-                lnk = futures[fut]
+            # 1. Fetch Main Page
+            r = requests.get(url, headers=HEADERS, timeout=TIMEOUT, allow_redirects=True)
+            content = r.text
+            
+            # Scan HTML
+            results.extend(self.process_source(content, url))
+            
+            # 2. Extract JS Files
+            soup = BeautifulSoup(content, "html.parser")
+            js_urls = set()
+            for script in soup.find_all("script", src=True):
+                full_js_url = urljoin(url, script["src"])
+                # Filter external CDNs if desired, but for bounties we want to check everything
+                if any(ext in full_js_url for ext in ['.js', '.json']):
+                    js_urls.add(full_js_url)
+            
+            # 3. Crawl JS Files
+            for js_url in js_urls:
                 try:
-                    txt = fut.result()
-                    result["findings"] += scan_content(lnk, txt)
+                    # Limit JS size to prevent memory bombs
+                    js_r = requests.get(js_url, headers=HEADERS, timeout=TIMEOUT)
+                    if len(js_r.content) > 5000000: # Skip files > 5MB
+                        continue
+                    results.extend(self.process_source(js_r.text, js_url))
                 except Exception as e:
-                    logging.debug("Failed to fetch linked %s: %s", lnk, e)
-    else:
-        # local file
-        try:
-            with open(src, "r", encoding="utf-8", errors="ignore") as fh:
-                content = fh.read()
-            result["findings"] += scan_content(src, content)
+                    pass # Fail silently for individual JS files
+            
+            # 4. Scan Headers (Real World Session Leaks)
+            for header, value in r.headers.items():
+                if "cookie" in header.lower() or "set-cookie" in header.lower():
+                     # Look for session IDs in headers
+                     if re.search(r'(sess|auth|token|id)=[a-f0-9]{20,}', value, re.I):
+                         results.append({
+                             "type": "Session Cookie Header",
+                             "severity": "MEDIUM",
+                             "value": value[:100] + "...",
+                             "url": url
+                         })
+
         except Exception as e:
-            logging.warning("Cannot read file %s: %s", src, e)
-    return result
+            pass # Ignore connection errors during scan run
+            
+        return url, results
 
-# ------- Utility to pretty-print / save -------
-def save_results(results: List[Dict[str, Any]], text_path=OUTPUT_TEXT, json_path=OUTPUT_JSON):
-    # human-readable
-    with open(text_path, "w", encoding="utf-8") as fh:
-        for res in results:
-            fh.write(f"\n[+] Source: {res['source']}\n{'='*80}\n")
-            if not res["findings"]:
-                fh.write("  (no findings)\n")
-                continue
-            for f in res["findings"]:
-                fh.write(f"  - [{f.get('engine')}] {f.get('type')} : {f.get('secret')}\n")
-                snippet = f.get("snippet")
-                if snippet:
-                    fh.write(f"      snippet: ...{snippet}...\n")
-    # structured JSON
-    with open(json_path, "w", encoding="utf-8") as jf:
-        json.dump(results, jf, indent=2, ensure_ascii=False)
+# ================= GUI INTERFACE ================= #
+class App:
+    def __init__(self, root):
+        root.title("SECRET OF BOUNTY: REAL TARGET MODE v5.1")
+        root.geometry("1300x700")
+        root.configure(bg="#0d1117")
+        
+        self.scanner = RealTargetScanner()
+        self.stop_flag = False
 
-# ------- CLI -------
-def main():
-    parser = argparse.ArgumentParser(description="Secret-Killer v2.0 — scan URLs / local JS/JSON for secrets")
-    parser.add_argument("input_list", help="Plain text file with one URL or file path per line")
-    parser.add_argument("-o", "--output", help="Base name for outputs (text/json). Default: secret-killer_results", default="secret-killer_results")
-    parser.add_argument("-w", "--workers", help="Parallel workers (default 8)", type=int, default=MAX_WORKERS)
-    parser.add_argument("-v", "--verbose", help="Verbose logging", action="store_true")
-    args = parser.parse_args()
+        # --- Header ---
+        header_frame = Frame(root, bg="#0d1117")
+        header_frame.pack(pady=10)
+        
+        Label(header_frame, text="SECRET OF BOUNTY", font=("Consolas", 26, "bold"),
+              fg="#00ffcc", bg="#0d1117").pack(side=LEFT, padx=10)
+        Label(header_frame, text="[ELITE EDITION]", font=("Consolas", 12),
+              fg="#f44336", bg="#0d1117").pack(side=LEFT, padx=5)
 
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+        # --- Control Panel ---
+        ctrl_frame = Frame(root, bg="#161b22", pady=10)
+        ctrl_frame.pack(fill=X, padx=20, pady=5)
+        
+        Button(ctrl_frame, text="📂 Load URL File & Scan", command=self.start_scan,
+               bg="#00ffcc", fg="#000", font=("Arial", 10, "bold"), padx=15).pack(side=LEFT, padx=10)
+        
+        Button(ctrl_frame, text="🛑 Stop", command=self.stop_scan,
+               bg="#f44336", fg="white", font=("Arial", 10, "bold"), padx=15).pack(side=LEFT, padx=10)
 
-    base_out = args.output
-    text_out = base_out + ".txt"
-    json_out = base_out + ".json"
+        self.lbl_status = Label(ctrl_frame, text="Idle", fg="#00ffcc", bg="#161b22", font=("Consolas", 12))
+        self.lbl_status.pack(side=LEFT, padx=20)
 
-    if not os.path.isfile(args.input_list):
-        logging.error("Input list file not found: %s", args.input_list)
-        sys.exit(1)
+        self.progress = ttk.Progressbar(ctrl_frame, length=400, mode="determinate")
+        self.progress.pack(side=LEFT, padx=10)
 
-    with open(args.input_list, "r", encoding="utf-8") as fh:
-        sources = [l.strip() for l in fh if l.strip() and not l.strip().startswith("#")]
+        # --- Results Area ---
+        columns = ("Type", "Severity", "Value", "Source URL")
+        self.tree = ttk.Treeview(root, columns=columns, show="headings")
+        
+        self.tree.heading("Type", text="FINDING TYPE")
+        self.tree.heading("Severity", text="SEVERITY")
+        self.tree.heading("Value", text="DETECTED VALUE")
+        self.tree.heading("Source URL", text="LOCATION")
+        
+        self.tree.column("Type", width=200, anchor=W)
+        self.tree.column("Severity", width=100, anchor=CENTER)
+        self.tree.column("Value", width=400, anchor=W)
+        self.tree.column("Source URL", width=400, anchor=W)
+        
+        self.tree.pack(expand=True, fill=BOTH, padx=10, pady=10)
+        
+        # Scrollbar
+        scrollbar = Scrollbar(root, orient=VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscroll=scrollbar.set)
+        scrollbar.place(relx=0.98, rely=0.2, relheight=0.7, anchor=NE)
 
-    if not sources:
-        logging.error("No sources to scan (empty input list).")
-        sys.exit(1)
+        # Configure Tags for Colors
+        for sev, color in SEVERITY_COLORS.items():
+            self.tree.tag_configure(sev, background=color, foreground="white" if sev != "INFO" else "#aaaaaa")
 
-    results = []
-    logging.info("Starting scan of %d sources with %d workers", len(sources), args.workers)
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futures = {ex.submit(process_source, s): s for s in sources}
-        for fut in as_completed(futures):
-            s = futures[fut]
-            try:
-                r = fut.result()
-                results.append(r)
-                logging.info("Completed: %s (findings: %d)", s, len(r["findings"]))
-            except Exception as e:
-                logging.warning("Failed to process %s: %s", s, e)
+    def start_scan(self):
+        path = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
+        if not path: return
+        
+        with open(path, 'r') as f:
+            urls = [u.strip() for u in f if u.strip() and u.startswith(('http://', 'https://'))]
+        
+        if not urls:
+            messagebox.showwarning("Input Error", "No valid URLs found.")
+            return
 
-    save_results(results, text_out, json_out)
-    logging.info("Scan complete. Results saved to %s and %s", text_out, json_out)
+        self.lbl_status.config(text=f"Scanning {len(urls)} targets...", fg="#ffff00")
+        self.progress["maximum"] = len(urls)
+        self.progress["value"] = 0
+        self.stop_flag = False
+        
+        # Clear old results
+        for item in self.tree.get_children():
+            self.tree.delete(item)
 
+        # Thread pool execution
+        def run_pool():
+            findings_buffer = {} # Store by URL for JSON export
+            with ThreadPoolExecutor(max_workers=THREADS) as executor:
+                future_to_url = {executor.submit(self.scanner.scan_target, url): url for url in urls}
+                
+                for i, future in enumerate(as_completed(future_to_url)):
+                    if self.stop_flag: break
+                    
+                    url = future_to_url[future]
+                    try:
+                        u, findings = future.result()
+                        if findings:
+                            findings_buffer[u] = findings
+                            # GUI Update
+                            for f in findings:
+                                self.tree.insert("", 0, values=(
+                                    f['type'], f['severity'], f['value'], f['url']
+                                ), tags=(f['severity'],))
+                    except Exception as e:
+                        print(f"Error processing {url}: {e}")
+                    
+                    # Progress Update
+                    self.progress["value"] = i + 1
+                    self.progress.update()
+                    self.lbl_status.config(text=f"Processed {i+1}/{len(urls)}")
+
+            # Save JSON
+            with open("results_real_target.json", "w") as jf:
+                json.dump(findings_buffer, jf, indent=2)
+            
+            self.lbl_status.config(text="Scan Complete. Results saved.", fg="#00ffcc")
+
+        threading.Thread(target=run_pool, daemon=True).start()
+
+    def stop_scan(self):
+        self.stop_flag = True
+        self.lbl_status.config(text="Stopping...", fg="#f44336")
+
+# ================= ENTRY POINT ================= #
 if __name__ == "__main__":
-    main()
+    root = Tk()
+    try:
+        # High DPI fix for Windows
+        from ctypes import windll
+        windll.shcore.SetProcessDpiAwareness(1)
+    except:
+        pass
+    App(root)
+    root.mainloop()
