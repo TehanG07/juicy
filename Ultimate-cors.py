@@ -58,6 +58,7 @@ class Colors:
 # ══════════════════════════════════════════
 print_lock = threading.Lock()
 stats_lock = threading.Lock()
+results_lock = threading.Lock()  # <-- NEW: separate lock for results
 
 
 def safe_print(message):
@@ -137,12 +138,6 @@ class ScanStats:
 # RESPONSE HEADER ANALYZER
 # ══════════════════════════════════════════════════════════════
 class ResponseAnalyzer:
-    """
-    Analyzes CORS response headers and determines
-    vulnerability based on ACTUAL header values.
-    """
-
-    # Headers we care about
     CORS_HEADERS = [
         'Access-Control-Allow-Origin',
         'Access-Control-Allow-Credentials',
@@ -162,7 +157,6 @@ class ResponseAnalyzer:
 
     @staticmethod
     def extract_cors_headers(response):
-        """Extract all CORS-related headers from response"""
         headers = {}
         for h in ResponseAnalyzer.CORS_HEADERS:
             val = response.headers.get(h, '')
@@ -171,7 +165,6 @@ class ResponseAnalyzer:
 
     @staticmethod
     def has_any_cors_headers(response):
-        """Check if response has ANY CORS headers"""
         for h in ResponseAnalyzer.CORS_HEADERS:
             if response.headers.get(h):
                 return True
@@ -179,12 +172,6 @@ class ResponseAnalyzer:
 
     @staticmethod
     def analyze_vulnerability(origin_sent, cors_headers, test_info):
-        """
-        Core logic: Analyze response headers to determine
-        if CORS misconfiguration exists.
-
-        Returns dict with vulnerability details or None
-        """
         acao = cors_headers.get('Access-Control-Allow-Origin', '')
         acac = cors_headers.get('Access-Control-Allow-Credentials', '')
         acam = cors_headers.get('Access-Control-Allow-Methods', '')
@@ -207,7 +194,6 @@ class ResponseAnalyzer:
             'response_analysis': [],
         }
 
-        # No ACAO header = no CORS = not vulnerable to CORS attacks
         if not acao:
             return None
 
@@ -215,8 +201,6 @@ class ResponseAnalyzer:
         is_wildcard = False
         is_null_allowed = False
 
-        # ─── CHECK 1: Origin Reflection ───
-        # Server echoes back our evil origin exactly
         if acao == origin_sent and origin_sent not in ('', '*'):
             is_reflected = True
             vuln_details['vuln_type'] = 'Origin Reflected'
@@ -224,7 +208,6 @@ class ResponseAnalyzer:
                 f"ACAO header reflects sent origin '{origin_sent}' verbatim"
             )
 
-        # ─── CHECK 2: Wildcard ───
         if acao == '*':
             is_wildcard = True
             vuln_details['wildcard'] = True
@@ -232,7 +215,6 @@ class ResponseAnalyzer:
                 "ACAO is wildcard (*) - allows any origin"
             )
 
-        # ─── CHECK 3: Null Origin ───
         if acao.lower() == 'null' and origin_sent.lower() == 'null':
             is_null_allowed = True
             vuln_details['vuln_type'] = 'Null Origin Allowed'
@@ -241,20 +223,16 @@ class ResponseAnalyzer:
                 "sandboxed iframe, data: URI, file: protocol"
             )
 
-        # If none of these match, it's not vulnerable
         if not (is_reflected or is_wildcard or is_null_allowed):
             return None
 
-        # ─── CHECK 4: Credentials ───
         if acac.lower() == 'true':
             vuln_details['credentials_allowed'] = True
             vuln_details['response_analysis'].append(
-                "Access-Control-Allow-Credentials: true → "
+                "Access-Control-Allow-Credentials: true -> "
                 "cookies/auth headers sent cross-origin"
             )
 
-            # Wildcard + Credentials = browser blocks BUT
-            # it's still a severe misconfiguration indicator
             if is_wildcard:
                 vuln_details['severity'] = Severity.CRITICAL
                 vuln_details['vuln_type'] = 'Wildcard + Credentials'
@@ -264,7 +242,6 @@ class ResponseAnalyzer:
                     "severely broken CORS implementation"
                 )
             elif is_reflected:
-                # Reflection + Credentials = CRITICAL
                 vuln_details['severity'] = Severity.CRITICAL
                 vuln_details['response_analysis'].append(
                     "CRITICAL: Origin reflected WITH credentials - "
@@ -277,7 +254,6 @@ class ResponseAnalyzer:
                     "sandboxed iframe can steal authenticated data"
                 )
         else:
-            # No credentials but still reflected/wildcard
             if is_reflected:
                 vuln_details['response_analysis'].append(
                     "Origin reflected but no credentials flag - "
@@ -290,16 +266,14 @@ class ResponseAnalyzer:
                     "(without cookies)"
                 )
 
-        # ─── CHECK 5: Vary Header ───
         if 'origin' not in vary.lower():
             vuln_details['vary_origin_missing'] = True
             vuln_details['response_analysis'].append(
-                "Vary header missing 'Origin' → "
+                "Vary header missing 'Origin' -> "
                 "response may be cached by CDN/proxy "
                 "with attacker's ACAO, poisoning cache for all users"
             )
 
-        # ─── CHECK 6: Dangerous Methods ───
         if acam:
             found_dangerous = []
             for method in ResponseAnalyzer.DANGEROUS_METHODS:
@@ -310,10 +284,9 @@ class ResponseAnalyzer:
                 vuln_details['dangerous_methods_list'] = found_dangerous
                 vuln_details['response_analysis'].append(
                     f"Dangerous methods allowed: {', '.join(found_dangerous)} "
-                    f"→ attacker can modify/delete data cross-origin"
+                    f"-> attacker can modify/delete data cross-origin"
                 )
 
-        # ─── CHECK 7: Sensitive Headers Exposed ───
         if aceh:
             found_sensitive = []
             for sh in ResponseAnalyzer.SENSITIVE_HEADERS:
@@ -324,7 +297,7 @@ class ResponseAnalyzer:
                 vuln_details['sensitive_headers_list'] = found_sensitive
                 vuln_details['response_analysis'].append(
                     f"Sensitive headers exposed: {', '.join(found_sensitive)} "
-                    f"→ attacker JS can read these headers cross-origin"
+                    f"-> attacker JS can read these headers cross-origin"
                 )
 
         vuln_details['vulnerable'] = True
@@ -351,7 +324,7 @@ class UltimateCORSScanner:
         self.custom_headers = config.get('custom_headers', {})
         self.output_file = config.get('output_file', None)
 
-        self.results = []
+        self.results = []  # ONLY vulnerable findings stored here
         self.stats = ScanStats()
         self.analyzer = ResponseAnalyzer()
 
@@ -394,9 +367,6 @@ class UltimateCORSScanner:
                 'https': self.proxy,
             }
 
-    # ══════════════════════════════════════════
-    # Custom Headers Parser
-    # ══════════════════════════════════════════
     @staticmethod
     def parse_custom_headers(header_list):
         headers = {}
@@ -414,23 +384,31 @@ class UltimateCORSScanner:
         return headers
 
     # ══════════════════════════════════════════
-    # BASELINE REQUEST - Check if Origin exists
+    # THREAD-SAFE RESULT ADDING
+    # ══════════════════════════════════════════
+    def add_result(self, result):
+        """Thread-safe method to add a vulnerable finding"""
+        if result and result.get('vulnerable', False):
+            with results_lock:
+                self.results.append(result)
+            self.stats.add_vuln(result['severity'])
+            self.print_vulnerability(result)
+            return True
+        return False
+
+    def add_results_batch(self, results_list):
+        """Thread-safe method to add multiple findings"""
+        added = 0
+        for result in results_list:
+            if self.add_result(result):
+                added += 1
+        return added
+
+    # ══════════════════════════════════════════
+    # BASELINE REQUEST
     # ══════════════════════════════════════════
     def baseline_check(self, target_url):
-        """
-        Make a request WITHOUT Origin header to see
-        if the server already includes CORS headers.
-
-        Returns:
-            dict with:
-              - 'has_cors': bool
-              - 'cors_headers': dict of CORS headers
-              - 'status_code': int
-              - 'response': Response object
-              - 'baseline_acao': str (ACAO value without Origin)
-        """
         try:
-            # Remove Origin if somehow present
             headers = dict(self.session.headers)
             headers.pop('Origin', None)
 
@@ -490,18 +468,9 @@ class UltimateCORSScanner:
             'test_name': 'Arbitrary Origin Reflection',
             'category': 'Basic Reflection',
             'severity': Severity.CRITICAL,
-            'description': (
-                'Server reflects ANY arbitrary origin. '
-                'Attacker can read responses from any domain.'
-            ),
-            'impact': (
-                'Complete CORS bypass - attacker can steal '
-                'user data, tokens, PII from any origin'
-            ),
-            'remediation': (
-                'Implement strict origin whitelist. '
-                'Never reflect the Origin header blindly.'
-            ),
+            'description': 'Server reflects ANY arbitrary origin.',
+            'impact': 'Complete CORS bypass - attacker can steal user data, tokens, PII',
+            'remediation': 'Implement strict origin whitelist. Never reflect Origin blindly.',
         })
 
         origins.append({
@@ -530,14 +499,8 @@ class UltimateCORSScanner:
             'test_name': 'Null Origin Allowed',
             'category': 'Null Origin',
             'severity': Severity.HIGH,
-            'description': (
-                'Server allows null origin. Exploitable via '
-                'sandboxed iframes, redirects, and local files'
-            ),
-            'impact': (
-                'Attacker uses sandboxed iframe to send '
-                'requests with null origin and steal data'
-            ),
+            'description': 'Server allows null origin. Exploitable via sandboxed iframes.',
+            'impact': 'Attacker uses sandboxed iframe to steal data',
             'remediation': 'Never allow null origin',
         })
 
@@ -567,10 +530,7 @@ class UltimateCORSScanner:
             'test_name': 'Prefix Match Bypass',
             'category': 'Regex Bypass',
             'severity': Severity.HIGH,
-            'description': (
-                f'Server uses prefix matching. '
-                f'{target_domain}.evil.com accepted'
-            ),
+            'description': f'Server uses prefix matching. {target_domain}.evil.com accepted',
             'impact': 'Attacker registers domain containing target name',
             'remediation': 'Use exact match or proper regex with anchors',
         })
@@ -622,9 +582,7 @@ class UltimateCORSScanner:
             'test_name': 'Subdomain Trust - evil.target',
             'category': 'Subdomain Trust',
             'severity': Severity.MEDIUM,
-            'description': (
-                f'Server trusts any subdomain of {target_domain}'
-            ),
+            'description': f'Server trusts any subdomain of {target_domain}',
             'impact': 'Subdomain takeover + CORS bypass',
             'remediation': 'Whitelist specific subdomains only',
         })
@@ -774,7 +732,7 @@ class UltimateCORSScanner:
         })
 
         origins.append({
-            'origin': f'https://evil.com%0d%0aX-Injected: header',
+            'origin': 'https://evil.com%0d%0aX-Injected: header',
             'test_name': 'CRLF Injection in Origin',
             'category': 'Header Injection',
             'severity': Severity.HIGH,
@@ -831,9 +789,7 @@ class UltimateCORSScanner:
             'test_name': 'Userinfo @ Bypass',
             'category': 'Path Tricks',
             'severity': Severity.HIGH,
-            'description': (
-                f'Using @ sign: {target_domain}@evil.com'
-            ),
+            'description': f'Using @ sign: {target_domain}@evil.com',
             'impact': 'URL parser confusion',
             'remediation': 'Reject origins containing @ symbol',
         })
@@ -985,15 +941,9 @@ class UltimateCORSScanner:
         return origins
 
     # ══════════════════════════════════════════
-    # CORE: Test Single Origin with Smart Analysis
+    # CORE: Test Single Origin
     # ══════════════════════════════════════════
     def test_single_origin(self, target_url, origin_data, baseline_info):
-        """
-        Smart testing logic:
-        1. If baseline has NO CORS headers → Add Origin, check if CORS appears
-        2. If baseline HAS CORS headers → Test with evil origin, analyze response
-        3. Analyze based on ACTUAL response headers
-        """
         origin = origin_data['origin']
 
         try:
@@ -1009,30 +959,17 @@ class UltimateCORSScanner:
             cors_headers = self.analyzer.extract_cors_headers(response)
             has_cors_now = self.analyzer.has_any_cors_headers(response)
 
-            # Build result
             result = {
                 'url': target_url,
                 'test_name': origin_data['test_name'],
                 'category': origin_data['category'],
                 'origin_sent': origin,
-                'acao_header': cors_headers.get(
-                    'Access-Control-Allow-Origin', ''
-                ),
-                'acac_header': cors_headers.get(
-                    'Access-Control-Allow-Credentials', ''
-                ),
-                'acam_header': cors_headers.get(
-                    'Access-Control-Allow-Methods', ''
-                ),
-                'acah_header': cors_headers.get(
-                    'Access-Control-Allow-Headers', ''
-                ),
-                'acma_header': cors_headers.get(
-                    'Access-Control-Max-Age', ''
-                ),
-                'aceh_header': cors_headers.get(
-                    'Access-Control-Expose-Headers', ''
-                ),
+                'acao_header': cors_headers.get('Access-Control-Allow-Origin', ''),
+                'acac_header': cors_headers.get('Access-Control-Allow-Credentials', ''),
+                'acam_header': cors_headers.get('Access-Control-Allow-Methods', ''),
+                'acah_header': cors_headers.get('Access-Control-Allow-Headers', ''),
+                'acma_header': cors_headers.get('Access-Control-Max-Age', ''),
+                'aceh_header': cors_headers.get('Access-Control-Expose-Headers', ''),
                 'vary_header': cors_headers.get('Vary', ''),
                 'severity': origin_data['severity'],
                 'description': origin_data['description'],
@@ -1056,30 +993,22 @@ class UltimateCORSScanner:
                 'origin_triggered_cors': False,
             }
 
-            # ─── SMART DETECTION LOGIC ───
-
-            # Case A: Baseline had NO CORS → Our Origin triggered CORS headers
             if not baseline_info.get('has_cors', False) and has_cors_now:
                 result['origin_triggered_cors'] = True
                 result['response_analysis'].append(
-                    "⚡ No CORS headers in baseline (no Origin), "
-                    "but CORS headers appeared after adding Origin header. "
-                    "Server is dynamically generating CORS based on Origin."
+                    "No CORS headers in baseline, but CORS appeared "
+                    "after adding Origin. Server dynamically generates CORS."
                 )
 
-            # Case B: Baseline had CORS → Compare
             if baseline_info.get('has_cors', False):
                 baseline_acao = baseline_info.get('baseline_acao', '')
-                current_acao = cors_headers.get(
-                    'Access-Control-Allow-Origin', ''
-                )
+                current_acao = cors_headers.get('Access-Control-Allow-Origin', '')
                 if baseline_acao != current_acao:
                     result['response_analysis'].append(
                         f"ACAO changed from baseline '{baseline_acao}' "
                         f"to '{current_acao}' after sending Origin: {origin}"
                     )
 
-            # ─── Run vulnerability analysis on response headers ───
             vuln_details = self.analyzer.analyze_vulnerability(
                 origin, cors_headers, origin_data
             )
@@ -1095,9 +1024,7 @@ class UltimateCORSScanner:
                 result['dangerous_methods_list'] = vuln_details['dangerous_methods_list']
                 result['sensitive_headers_exposed'] = vuln_details['sensitive_headers_exposed']
                 result['sensitive_headers_list'] = vuln_details['sensitive_headers_list']
-                result['response_analysis'].extend(
-                    vuln_details['response_analysis']
-                )
+                result['response_analysis'].extend(vuln_details['response_analysis'])
 
             return result
 
@@ -1118,28 +1045,22 @@ class UltimateCORSScanner:
                 self.stats.errors += 1
             if self.verbose:
                 safe_print(
-                    f"  {Colors.YELLOW}[ERROR] {target_url}: "
-                    f"{str(e)}{Colors.END}"
+                    f"  {Colors.YELLOW}[ERROR] {target_url}: {str(e)}{Colors.END}"
                 )
             return None
 
     # ══════════════════════════════════════════
-    # PREFLIGHT (OPTIONS) TESTING
+    # PREFLIGHT TESTING
     # ══════════════════════════════════════════
     def test_preflight(self, target_url):
         results = []
 
         preflight_tests = [
-            {'method': 'PUT', 'headers': 'X-Custom-Header',
-             'name': 'PUT Method Preflight'},
-            {'method': 'DELETE', 'headers': 'X-Custom-Header',
-             'name': 'DELETE Method Preflight'},
-            {'method': 'PATCH', 'headers': 'Content-Type',
-             'name': 'PATCH Method Preflight'},
-            {'method': 'GET', 'headers': 'Authorization',
-             'name': 'Authorization Header Preflight'},
-            {'method': 'POST', 'headers': 'X-CSRF-Token, Content-Type',
-             'name': 'CSRF Token Preflight'},
+            {'method': 'PUT', 'headers': 'X-Custom-Header', 'name': 'PUT Method Preflight'},
+            {'method': 'DELETE', 'headers': 'X-Custom-Header', 'name': 'DELETE Method Preflight'},
+            {'method': 'PATCH', 'headers': 'Content-Type', 'name': 'PATCH Method Preflight'},
+            {'method': 'GET', 'headers': 'Authorization', 'name': 'Authorization Header Preflight'},
+            {'method': 'POST', 'headers': 'X-CSRF-Token, Content-Type', 'name': 'CSRF Token Preflight'},
         ]
 
         evil_origins = ['https://evil.com', 'null']
@@ -1154,9 +1075,7 @@ class UltimateCORSScanner:
                     }
 
                     response = self.session.options(
-                        target_url,
-                        headers=headers,
-                        timeout=self.timeout,
+                        target_url, headers=headers, timeout=self.timeout,
                     )
 
                     cors_headers = self.analyzer.extract_cors_headers(response)
@@ -1165,40 +1084,32 @@ class UltimateCORSScanner:
                     acah = cors_headers.get('Access-Control-Allow-Headers', '')
                     acac = cors_headers.get('Access-Control-Allow-Credentials', '')
 
-                    # Analyze
                     is_vuln = False
                     analysis = []
 
                     if acao == evil_origin or acao == '*':
                         is_vuln = True
                         analysis.append(
-                            f"Preflight ACAO: '{acao}' matches/wildcards for "
-                            f"evil origin '{evil_origin}'"
+                            f"Preflight ACAO: '{acao}' matches/wildcards "
+                            f"for evil origin '{evil_origin}'"
                         )
                     if acao.lower() == 'null' and evil_origin == 'null':
                         is_vuln = True
-                        analysis.append(
-                            "Preflight allows null origin"
-                        )
+                        analysis.append("Preflight allows null origin")
 
                     if acam:
                         analysis.append(f"Allowed Methods: {acam}")
                     if acah:
                         analysis.append(f"Allowed Headers: {acah}")
                     if acac.lower() == 'true':
-                        analysis.append(
-                            "Credentials allowed in preflight!"
-                        )
+                        analysis.append("Credentials allowed in preflight!")
 
                     if is_vuln:
-                        severity = Severity.CRITICAL if acac.lower() == 'true' \
-                            else Severity.HIGH
+                        severity = Severity.CRITICAL if acac.lower() == 'true' else Severity.HIGH
 
                         result = {
                             'url': target_url,
-                            'test_name': (
-                                f'Preflight: {test["name"]} ({evil_origin})'
-                            ),
+                            'test_name': f'Preflight: {test["name"]} ({evil_origin})',
                             'category': 'Preflight Bypass',
                             'origin_sent': evil_origin,
                             'acao_header': acao,
@@ -1209,17 +1120,9 @@ class UltimateCORSScanner:
                             'aceh_header': '',
                             'vary_header': '',
                             'severity': severity,
-                            'description': (
-                                f'Preflight for {test["method"]} '
-                                f'with {test["headers"]} allows evil origin'
-                            ),
-                            'impact': (
-                                f'Attacker can make {test["method"]} '
-                                f'requests cross-origin'
-                            ),
-                            'remediation': (
-                                'Restrict preflight to whitelisted origins'
-                            ),
+                            'description': f'Preflight for {test["method"]} with {test["headers"]} allows evil origin',
+                            'impact': f'Attacker can make {test["method"]} requests cross-origin',
+                            'remediation': 'Restrict preflight to whitelisted origins',
                             'vulnerable': True,
                             'vuln_type': 'Preflight Bypass',
                             'status_code': response.status_code,
@@ -1271,14 +1174,10 @@ class UltimateCORSScanner:
 
                 if acao == 'https://evil.com':
                     is_vuln = True
-                    analysis.append(
-                        f"ACAO reflects evil origin for {method} method"
-                    )
+                    analysis.append(f"ACAO reflects evil origin for {method} method")
                 elif acao == '*' and acac.lower() == 'true':
                     is_vuln = True
-                    analysis.append(
-                        f"Wildcard + Credentials on {method} method"
-                    )
+                    analysis.append(f"Wildcard + Credentials on {method} method")
 
                 if acac.lower() == 'true':
                     analysis.append("Credentials allowed")
@@ -1297,9 +1196,7 @@ class UltimateCORSScanner:
                         'aceh_header': '',
                         'vary_header': cors_headers.get('Vary', ''),
                         'severity': Severity.HIGH,
-                        'description': (
-                            f'{method} method allows evil origin'
-                        ),
+                        'description': f'{method} method allows evil origin',
                         'impact': f'Cross-origin {method} requests possible',
                         'remediation': 'Apply CORS policy to all HTTP methods',
                         'vulnerable': True,
@@ -1307,8 +1204,7 @@ class UltimateCORSScanner:
                         'status_code': response.status_code,
                         'credentials_allowed': acac.lower() == 'true',
                         'wildcard': acao == '*',
-                        'vary_origin_missing': 'origin' not in
-                            cors_headers.get('Vary', '').lower(),
+                        'vary_origin_missing': 'origin' not in cors_headers.get('Vary', '').lower(),
                         'dangerous_methods': True,
                         'dangerous_methods_list': [method],
                         'sensitive_headers_exposed': False,
@@ -1328,7 +1224,7 @@ class UltimateCORSScanner:
         return results
 
     # ══════════════════════════════════════════
-    # CACHE POISONING VIA CORS
+    # CACHE POISONING
     # ══════════════════════════════════════════
     def test_cache_poisoning(self, target_url):
         results = []
@@ -1346,9 +1242,7 @@ class UltimateCORSScanner:
             analysis = []
 
             is_cacheable = True
-            no_cache_indicators = [
-                'no-store', 'no-cache', 'private', 'max-age=0'
-            ]
+            no_cache_indicators = ['no-store', 'no-cache', 'private', 'max-age=0']
             for indicator in no_cache_indicators:
                 if indicator in cache_control.lower():
                     is_cacheable = False
@@ -1358,22 +1252,14 @@ class UltimateCORSScanner:
                 analysis.append(f"ACAO reflects evil origin: {acao}")
 
                 if 'origin' not in vary.lower():
-                    analysis.append(
-                        f"Vary header is '{vary}' - missing 'Origin'"
-                    )
+                    analysis.append(f"Vary header is '{vary}' - missing 'Origin'")
                 else:
-                    analysis.append(
-                        "Vary header includes Origin (good)"
-                    )
+                    analysis.append("Vary header includes Origin (good)")
 
                 if is_cacheable:
-                    analysis.append(
-                        f"Cache-Control: '{cache_control}' - response IS cacheable"
-                    )
+                    analysis.append(f"Cache-Control: '{cache_control}' - response IS cacheable")
                 else:
-                    analysis.append(
-                        f"Cache-Control: '{cache_control}' - response NOT cacheable"
-                    )
+                    analysis.append(f"Cache-Control: '{cache_control}' - response NOT cacheable")
 
                 if 'origin' not in vary.lower() and is_cacheable:
                     result = {
@@ -1382,27 +1268,16 @@ class UltimateCORSScanner:
                         'category': 'Cache Poisoning',
                         'origin_sent': 'https://evil.com',
                         'acao_header': acao,
-                        'acac_header': cors_headers.get(
-                            'Access-Control-Allow-Credentials', ''
-                        ),
+                        'acac_header': cors_headers.get('Access-Control-Allow-Credentials', ''),
                         'acam_header': '',
                         'acah_header': '',
                         'acma_header': '',
                         'aceh_header': '',
                         'vary_header': vary,
                         'severity': Severity.HIGH,
-                        'description': (
-                            'CORS response is cacheable but missing '
-                            'Vary: Origin header'
-                        ),
-                        'impact': (
-                            'CDN/proxy cache stores response with '
-                            'evil ACAO → all users get poisoned'
-                        ),
-                        'remediation': (
-                            'Add Vary: Origin header OR set '
-                            'Cache-Control: no-store'
-                        ),
+                        'description': 'CORS response is cacheable but missing Vary: Origin header',
+                        'impact': 'CDN/proxy cache stores response with evil ACAO',
+                        'remediation': 'Add Vary: Origin header OR set Cache-Control: no-store',
                         'vulnerable': True,
                         'vuln_type': 'Cache Poisoning',
                         'status_code': response.status_code,
@@ -1435,12 +1310,7 @@ class UltimateCORSScanner:
         results = []
         parsed = urlparse(target_url)
 
-        ws_paths = [
-            parsed.path or '/',
-            '/ws',
-            '/websocket',
-            '/socket.io/',
-        ]
+        ws_paths = [parsed.path or '/', '/ws', '/websocket', '/socket.io/']
 
         for path in ws_paths:
             try:
@@ -1469,9 +1339,7 @@ class UltimateCORSScanner:
 
                 if response.status_code in (101, 200):
                     if acao == 'https://evil.com' or acao == '*':
-                        analysis.append(
-                            "WebSocket handshake accepts evil origin!"
-                        )
+                        analysis.append("WebSocket handshake accepts evil origin!")
 
                         result = {
                             'url': http_url,
@@ -1486,16 +1354,9 @@ class UltimateCORSScanner:
                             'aceh_header': '',
                             'vary_header': '',
                             'severity': Severity.HIGH,
-                            'description': (
-                                'WebSocket endpoint allows cross-origin'
-                            ),
-                            'impact': (
-                                'Attacker can establish WebSocket and '
-                                'steal real-time data'
-                            ),
-                            'remediation': (
-                                'Validate Origin in WebSocket handshake'
-                            ),
+                            'description': 'WebSocket endpoint allows cross-origin',
+                            'impact': 'Attacker can establish WebSocket and steal data',
+                            'remediation': 'Validate Origin in WebSocket handshake',
                             'vulnerable': True,
                             'vuln_type': 'WebSocket CORS',
                             'status_code': response.status_code,
@@ -1521,7 +1382,7 @@ class UltimateCORSScanner:
         return results
 
     # ══════════════════════════════════════════
-    # CONTENT TYPE VARIATION TEST
+    # CONTENT TYPE VARIATION
     # ══════════════════════════════════════════
     def test_content_type_bypass(self, target_url):
         results = []
@@ -1556,14 +1417,10 @@ class UltimateCORSScanner:
                 analysis.append(f"ACAO received: '{acao}'")
 
                 if acao == 'https://evil.com':
-                    analysis.append(
-                        f"Evil origin reflected for POST with CT: {ct}"
-                    )
+                    analysis.append(f"Evil origin reflected for POST with CT: {ct}")
                     if acac.lower() == 'true':
                         analysis.append("Credentials allowed!")
 
-                    # Simple requests (text/plain, form-urlencoded,
-                    # multipart/form-data) skip preflight
                     simple_types = [
                         'text/plain',
                         'application/x-www-form-urlencoded',
@@ -1571,9 +1428,7 @@ class UltimateCORSScanner:
                     ]
                     if ct in simple_types:
                         analysis.append(
-                            f"⚡ '{ct}' is a simple request type - "
-                            f"NO preflight required! Browser sends "
-                            f"directly."
+                            f"'{ct}' is a simple request type - NO preflight required!"
                         )
 
                     result = {
@@ -1589,9 +1444,7 @@ class UltimateCORSScanner:
                         'aceh_header': '',
                         'vary_header': cors_headers.get('Vary', ''),
                         'severity': Severity.HIGH,
-                        'description': (
-                            f'POST with Content-Type: {ct} allows evil origin'
-                        ),
+                        'description': f'POST with Content-Type: {ct} allows evil origin',
                         'impact': 'Cross-origin POST without preflight',
                         'remediation': 'Apply CORS to all content types',
                         'vulnerable': True,
@@ -1626,68 +1479,36 @@ class UltimateCORSScanner:
             target_url = 'https://' + target_url
         target_url = target_url.rstrip('/')
 
-        safe_print(
-            f"\n{Colors.BLUE}{Colors.BOLD}"
-            f"{'═' * 60}{Colors.END}"
-        )
-        safe_print(
-            f"{Colors.BLUE}[*] Scanning: {target_url}{Colors.END}"
-        )
-        safe_print(
-            f"{Colors.BLUE}{'═' * 60}{Colors.END}"
-        )
+        safe_print(f"\n{Colors.BLUE}{Colors.BOLD}{'=' * 60}{Colors.END}")
+        safe_print(f"{Colors.BLUE}[*] Scanning: {target_url}{Colors.END}")
+        safe_print(f"{Colors.BLUE}{'=' * 60}{Colors.END}")
 
-        url_results = []
-        found_vuln = False
+        url_vulns_count = 0
 
-        # ─── Phase 0: Connectivity + Baseline Check ───
-        safe_print(
-            f"\n  {Colors.CYAN}[Phase 0] "
-            f"Connectivity & Baseline Check...{Colors.END}"
-        )
+        # ─── Phase 0: Baseline ───
+        safe_print(f"\n  {Colors.CYAN}[Phase 0] Connectivity & Baseline Check...{Colors.END}")
 
         baseline_info = self.baseline_check(target_url)
 
         if baseline_info is None:
-            safe_print(
-                f"  {Colors.RED}[✗] Target unreachable{Colors.END}"
-            )
-            return url_results
+            safe_print(f"  {Colors.RED}[X] Target unreachable{Colors.END}")
+            return []
 
-        safe_print(
-            f"  {Colors.GREEN}[✓] Target alive "
-            f"(Status: {baseline_info['status_code']}){Colors.END}"
-        )
+        safe_print(f"  {Colors.GREEN}[+] Target alive (Status: {baseline_info['status_code']}){Colors.END}")
 
         if baseline_info['has_cors']:
-            safe_print(
-                f"  {Colors.YELLOW}[!] Baseline has CORS headers "
-                f"(without Origin){Colors.END}"
-            )
-            safe_print(
-                f"  {Colors.WHITE}    └── ACAO: "
-                f"'{baseline_info['baseline_acao']}'{Colors.END}"
-            )
+            safe_print(f"  {Colors.YELLOW}[!] Baseline has CORS headers (without Origin){Colors.END}")
+            safe_print(f"  {Colors.WHITE}    ACAO: '{baseline_info['baseline_acao']}'{Colors.END}")
             for h, v in baseline_info['cors_headers'].items():
                 if v and h != 'Access-Control-Allow-Origin':
-                    safe_print(
-                        f"  {Colors.WHITE}    └── {h}: "
-                        f"'{v}'{Colors.END}"
-                    )
+                    safe_print(f"  {Colors.WHITE}    {h}: '{v}'{Colors.END}")
         else:
-            safe_print(
-                f"  {Colors.GREEN}[i] No CORS headers in baseline "
-                f"(will add Origin and test){Colors.END}"
-            )
+            safe_print(f"  {Colors.GREEN}[i] No CORS headers in baseline{Colors.END}")
 
         # ─── Phase 1: Origin Reflection Tests ───
         evil_origins = self.generate_all_origins(target_url)
 
-        safe_print(
-            f"\n  {Colors.CYAN}[Phase 1/6] "
-            f"Origin Reflection Tests ({len(evil_origins)} tests)..."
-            f"{Colors.END}"
-        )
+        safe_print(f"\n  {Colors.CYAN}[Phase 1/6] Origin Reflection Tests ({len(evil_origins)} tests)...{Colors.END}")
 
         for origin_data in evil_origins:
             if self.delay > 0:
@@ -1696,117 +1517,65 @@ class UltimateCORSScanner:
             with stats_lock:
                 self.stats.total_tests += 1
 
-            result = self.test_single_origin(
-                target_url, origin_data, baseline_info
-            )
+            result = self.test_single_origin(target_url, origin_data, baseline_info)
 
-            if result and result['vulnerable']:
-                found_vuln = True
-                url_results.append(result)
-                self.print_vulnerability(result)
-                self.stats.add_vuln(result['severity'])
+            if result and result.get('vulnerable', False):
+                self.add_result(result)
+                url_vulns_count += 1
             elif result and self.verbose:
-                safe_print(
-                    f"    {Colors.GREEN}[SAFE] "
-                    f"{origin_data['test_name']}{Colors.END}"
-                )
+                safe_print(f"    {Colors.GREEN}[SAFE] {origin_data['test_name']}{Colors.END}")
 
         # ─── Phase 2: Preflight Tests ───
-        safe_print(
-            f"\n  {Colors.CYAN}[Phase 2/6] "
-            f"Preflight (OPTIONS) Tests...{Colors.END}"
-        )
-
+        safe_print(f"\n  {Colors.CYAN}[Phase 2/6] Preflight (OPTIONS) Tests...{Colors.END}")
         preflight_results = self.test_preflight(target_url)
-        for result in preflight_results:
-            found_vuln = True
-            url_results.append(result)
-            self.print_vulnerability(result)
-            self.stats.add_vuln(result['severity'])
+        url_vulns_count += self.add_results_batch(preflight_results)
 
-        # ─── Phase 3: Method Variation Tests ───
+        # ─── Phase 3: Method Variation ───
         if self.test_methods:
-            safe_print(
-                f"\n  {Colors.CYAN}[Phase 3/6] "
-                f"HTTP Method Variation Tests...{Colors.END}"
-            )
+            safe_print(f"\n  {Colors.CYAN}[Phase 3/6] HTTP Method Variation Tests...{Colors.END}")
             method_results = self.test_method_variations(target_url)
-            for result in method_results:
-                found_vuln = True
-                url_results.append(result)
-                self.print_vulnerability(result)
-                self.stats.add_vuln(result['severity'])
+            url_vulns_count += self.add_results_batch(method_results)
 
-        # ─── Phase 4: Cache Poisoning Tests ───
+        # ─── Phase 4: Cache Poisoning ───
         if self.test_cache:
-            safe_print(
-                f"\n  {Colors.CYAN}[Phase 4/6] "
-                f"Cache Poisoning Tests...{Colors.END}"
-            )
+            safe_print(f"\n  {Colors.CYAN}[Phase 4/6] Cache Poisoning Tests...{Colors.END}")
             cache_results = self.test_cache_poisoning(target_url)
-            for result in cache_results:
-                found_vuln = True
-                url_results.append(result)
-                self.print_vulnerability(result)
-                self.stats.add_vuln(result['severity'])
+            url_vulns_count += self.add_results_batch(cache_results)
 
-        # ─── Phase 5: WebSocket Tests ───
+        # ─── Phase 5: WebSocket ───
         if self.test_websocket:
-            safe_print(
-                f"\n  {Colors.CYAN}[Phase 5/6] "
-                f"WebSocket CORS Tests...{Colors.END}"
-            )
+            safe_print(f"\n  {Colors.CYAN}[Phase 5/6] WebSocket CORS Tests...{Colors.END}")
             ws_results = self.test_websocket_cors(target_url)
-            for result in ws_results:
-                found_vuln = True
-                url_results.append(result)
-                self.print_vulnerability(result)
-                self.stats.add_vuln(result['severity'])
+            url_vulns_count += self.add_results_batch(ws_results)
 
-        # ─── Phase 6: Content-Type Tests ───
-        safe_print(
-            f"\n  {Colors.CYAN}[Phase 6/6] "
-            f"Content-Type Bypass Tests...{Colors.END}"
-        )
+        # ─── Phase 6: Content-Type ───
+        safe_print(f"\n  {Colors.CYAN}[Phase 6/6] Content-Type Bypass Tests...{Colors.END}")
         ct_results = self.test_content_type_bypass(target_url)
-        for result in ct_results:
-            found_vuln = True
-            url_results.append(result)
-            self.print_vulnerability(result)
-            self.stats.add_vuln(result['severity'])
+        url_vulns_count += self.add_results_batch(ct_results)
 
         # ─── URL Summary ───
-        if not found_vuln:
-            safe_print(
-                f"\n  {Colors.GREEN}{Colors.BOLD}"
-                f"[✓] No CORS misconfiguration found{Colors.END}"
-            )
+        if url_vulns_count == 0:
+            safe_print(f"\n  {Colors.GREEN}{Colors.BOLD}[+] No CORS misconfiguration found{Colors.END}")
         else:
-            safe_print(
-                f"\n  {Colors.RED}{Colors.BOLD}"
-                f"[!] {len(url_results)} vulnerabilities "
-                f"found!{Colors.END}"
-            )
+            safe_print(f"\n  {Colors.RED}{Colors.BOLD}[!] {url_vulns_count} vulnerabilities found!{Colors.END}")
 
-        self.results.extend(url_results)
-        return url_results
+        # ─── DEBUG: Confirm results stored ───
+        with results_lock:
+            total_stored = len(self.results)
+        safe_print(f"  {Colors.CYAN}[DEBUG] Total findings in memory: {total_stored}{Colors.END}")
+
+        return url_vulns_count
 
     # ══════════════════════════════════════════
-    # BULK SCANNING FROM FILE
+    # BULK SCANNING
     # ══════════════════════════════════════════
     def scan_from_file(self, filepath):
         if not os.path.exists(filepath):
-            safe_print(
-                f"{Colors.RED}[ERROR] File not found: "
-                f"{filepath}{Colors.END}"
-            )
+            safe_print(f"{Colors.RED}[ERROR] File not found: {filepath}{Colors.END}")
             sys.exit(1)
 
         with open(filepath, 'r') as f:
-            urls = [
-                line.strip() for line in f
-                if line.strip() and not line.startswith('#')
-            ]
+            urls = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
         seen = set()
         unique_urls = []
@@ -1823,8 +1592,7 @@ class UltimateCORSScanner:
 
         with ThreadPoolExecutor(max_workers=self.threads) as executor:
             future_to_url = {
-                executor.submit(self.scan_url, url): url
-                for url in urls
+                executor.submit(self.scan_url, url): url for url in urls
             }
 
             completed = 0
@@ -1834,17 +1602,10 @@ class UltimateCORSScanner:
                 try:
                     future.result()
                 except Exception as e:
-                    safe_print(
-                        f"{Colors.RED}[ERROR] {url}: "
-                        f"{str(e)}{Colors.END}"
-                    )
+                    safe_print(f"{Colors.RED}[ERROR] {url}: {str(e)}{Colors.END}")
 
                 if completed % 5 == 0:
-                    safe_print(
-                        f"\n{Colors.CYAN}[Progress] "
-                        f"{completed}/{len(urls)} URLs "
-                        f"scanned{Colors.END}"
-                    )
+                    safe_print(f"\n{Colors.CYAN}[Progress] {completed}/{len(urls)} URLs scanned{Colors.END}")
 
     # ══════════════════════════════════════════
     # VULNERABILITY PRINTER (Terminal)
@@ -1860,37 +1621,22 @@ class UltimateCORSScanner:
             Severity.INFO: Colors.WHITE,
         }
         icon_map = {
-            Severity.CRITICAL: '🔴',
-            Severity.HIGH: '🟠',
-            Severity.MEDIUM: '🟡',
-            Severity.LOW: '🔵',
-            Severity.INFO: '⚪',
+            Severity.CRITICAL: '[!!!]',
+            Severity.HIGH: '[!!]',
+            Severity.MEDIUM: '[!]',
+            Severity.LOW: '[*]',
+            Severity.INFO: '[i]',
         }
 
         color = color_map.get(severity, Colors.WHITE)
-        icon = icon_map.get(severity, '⚪')
+        icon = icon_map.get(severity, '[i]')
 
-        safe_print(
-            f"\n    {color}{icon} [{severity}] "
-            f"{result['test_name']}{Colors.END}"
-        )
-        safe_print(
-            f"    {Colors.WHITE}├── Category: "
-            f"{result['category']}{Colors.END}"
-        )
-        safe_print(
-            f"    {Colors.WHITE}├── URL: "
-            f"{result['url']}{Colors.END}"
-        )
-        safe_print(
-            f"    {Colors.WHITE}├── Origin Sent: "
-            f"{result['origin_sent']}{Colors.END}"
-        )
+        safe_print(f"\n    {color}{icon} [{severity}] {result['test_name']}{Colors.END}")
+        safe_print(f"    {Colors.WHITE}|-- Category: {result['category']}{Colors.END}")
+        safe_print(f"    {Colors.WHITE}|-- URL: {result['url']}{Colors.END}")
+        safe_print(f"    {Colors.WHITE}|-- Origin Sent: {result['origin_sent']}{Colors.END}")
 
-        # ─── Show ALL response CORS headers ───
-        safe_print(
-            f"    {Colors.WHITE}├── Response Headers:{Colors.END}"
-        )
+        safe_print(f"    {Colors.WHITE}|-- Response Headers:{Colors.END}")
 
         cors_h = result.get('all_cors_headers', {})
         if cors_h:
@@ -1899,106 +1645,75 @@ class UltimateCORSScanner:
                     indicator = ''
                     if h == 'Access-Control-Allow-Origin':
                         if v == result.get('origin_sent', ''):
-                            indicator = f' {Colors.RED}← REFLECTED!{Colors.END}'
+                            indicator = f' {Colors.RED}<-- REFLECTED!{Colors.END}'
                         elif v == '*':
-                            indicator = f' {Colors.RED}← WILDCARD!{Colors.END}'
+                            indicator = f' {Colors.RED}<-- WILDCARD!{Colors.END}'
                         elif v.lower() == 'null':
-                            indicator = f' {Colors.RED}← NULL!{Colors.END}'
+                            indicator = f' {Colors.RED}<-- NULL!{Colors.END}'
                     elif h == 'Access-Control-Allow-Credentials':
                         if v.lower() == 'true':
-                            indicator = f' {Colors.RED}← DANGEROUS!{Colors.END}'
+                            indicator = f' {Colors.RED}<-- DANGEROUS!{Colors.END}'
                     elif h == 'Vary':
                         if 'origin' not in v.lower():
-                            indicator = f' {Colors.YELLOW}← Missing Origin!{Colors.END}'
+                            indicator = f' {Colors.YELLOW}<-- Missing Origin!{Colors.END}'
 
-                    safe_print(
-                        f"    {Colors.WHITE}│   ├── {h}: "
-                        f"{v}{indicator}{Colors.END}"
-                    )
-        else:
-            safe_print(
-                f"    {Colors.WHITE}│   ├── ACAO: "
-                f"{result['acao_header']}{Colors.END}"
-            )
-            if result.get('acac_header'):
-                safe_print(
-                    f"    {Colors.WHITE}│   ├── ACAC: "
-                    f"{result['acac_header']}{Colors.END}"
-                )
+                    safe_print(f"    {Colors.WHITE}|   |-- {h}: {v}{indicator}{Colors.END}")
 
-        # ─── Show baseline info ───
         if result.get('origin_triggered_cors'):
-            safe_print(
-                f"    {Colors.MAGENTA}├── ⚡ Origin TRIGGERED CORS "
-                f"(no CORS in baseline){Colors.END}"
-            )
+            safe_print(f"    {Colors.MAGENTA}|-- Origin TRIGGERED CORS (no CORS in baseline){Colors.END}")
 
-        # ─── Credential warning ───
         if result.get('credentials_allowed'):
-            safe_print(
-                f"    {Colors.RED}├── ⚠ CREDENTIALS: "
-                f"ALLOWED - cookies/auth sent cross-origin!{Colors.END}"
-            )
+            safe_print(f"    {Colors.RED}|-- CREDENTIALS: ALLOWED!{Colors.END}")
 
-        # ─── Vary warning ───
         if result.get('vary_origin_missing'):
-            safe_print(
-                f"    {Colors.YELLOW}├── ⚠ Vary: Origin "
-                f"MISSING (Cache Poisoning Risk){Colors.END}"
-            )
+            safe_print(f"    {Colors.YELLOW}|-- Vary: Origin MISSING (Cache Poisoning Risk){Colors.END}")
 
-        # ─── Dangerous methods ───
         if result.get('dangerous_methods'):
             methods = result.get('dangerous_methods_list', [])
-            safe_print(
-                f"    {Colors.RED}├── ⚠ Dangerous Methods: "
-                f"{', '.join(methods)}{Colors.END}"
-            )
+            safe_print(f"    {Colors.RED}|-- Dangerous Methods: {', '.join(methods)}{Colors.END}")
 
-        # ─── Sensitive headers ───
         if result.get('sensitive_headers_exposed'):
             hdrs = result.get('sensitive_headers_list', [])
-            safe_print(
-                f"    {Colors.RED}├── ⚠ Sensitive Headers Exposed: "
-                f"{', '.join(hdrs)}{Colors.END}"
-            )
+            safe_print(f"    {Colors.RED}|-- Sensitive Headers Exposed: {', '.join(hdrs)}{Colors.END}")
 
-        # ─── Response Analysis (WHY it's vulnerable) ───
         analysis = result.get('response_analysis', [])
         if analysis:
-            safe_print(
-                f"    {Colors.MAGENTA}├── Response Analysis:{Colors.END}"
-            )
+            safe_print(f"    {Colors.MAGENTA}|-- Response Analysis:{Colors.END}")
             for i, line in enumerate(analysis):
-                prefix = '│   ├──' if i < len(analysis) - 1 else '│   └──'
-                safe_print(
-                    f"    {Colors.MAGENTA}{prefix} {line}{Colors.END}"
-                )
+                prefix = '|   |--' if i < len(analysis) - 1 else '|   `--'
+                safe_print(f"    {Colors.MAGENTA}{prefix} {line}{Colors.END}")
 
-        safe_print(
-            f"    {Colors.WHITE}├── Status: "
-            f"{result['status_code']}{Colors.END}"
-        )
-        safe_print(
-            f"    {Colors.WHITE}├── Impact: "
-            f"{result.get('impact', 'N/A')}{Colors.END}"
-        )
-        safe_print(
-            f"    {Colors.WHITE}└── Fix: "
-            f"{result.get('remediation', 'N/A')}{Colors.END}"
-        )
+        safe_print(f"    {Colors.WHITE}|-- Status: {result['status_code']}{Colors.END}")
+        safe_print(f"    {Colors.WHITE}|-- Impact: {result.get('impact', 'N/A')}{Colors.END}")
+        safe_print(f"    {Colors.WHITE}`-- Fix: {result.get('remediation', 'N/A')}{Colors.END}")
 
-    # ══════════════════════════════════════════
-    # TXT REPORT - ONLY VULNERABLES
-    # ══════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════
+    # TXT REPORT - ONLY VULNERABLES - FIXED VERSION
+    # ══════════════════════════════════════════════════════════════
     def generate_txt_report(self, filename=None):
-        if not self.results:
-            safe_print(
-                f"\n{Colors.GREEN}[*] No vulnerabilities "
-                f"found - no report generated{Colors.END}"
-            )
-            return
+        """
+        Generate TXT report with ONLY vulnerable findings.
+        Each URL separated by clear ========= lines.
+        Easy to read format.
+        """
 
+        # Thread-safe read
+        with results_lock:
+            all_results = list(self.results)  # copy
+
+        safe_print(f"\n{Colors.CYAN}[*] Preparing report...{Colors.END}")
+        safe_print(f"{Colors.CYAN}[*] Total findings in memory: {len(all_results)}{Colors.END}")
+
+        # Filter ONLY vulnerable
+        vuln_results = [r for r in all_results if r.get('vulnerable', False)]
+
+        safe_print(f"{Colors.CYAN}[*] Vulnerable findings: {len(vuln_results)}{Colors.END}")
+
+        if not vuln_results:
+            safe_print(f"\n{Colors.GREEN}[*] No vulnerabilities found - no report generated{Colors.END}")
+            return False
+
+        # Generate filename
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         if filename is None:
             filename = f"cors_report_{timestamp}.txt"
@@ -2007,207 +1722,206 @@ class UltimateCORSScanner:
 
         # Group by URL
         url_groups = defaultdict(list)
-        for r in self.results:
-            if r.get('vulnerable'):
-                url_groups[r['url']].append(r)
+        for r in vuln_results:
+            url_groups[r['url']].append(r)
 
-        if not url_groups:
-            safe_print(
-                f"\n{Colors.GREEN}[*] No vulnerable findings{Colors.END}"
-            )
-            return
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
 
-        with open(filename, 'w') as f:
-            f.write("=" * 73 + "\n")
-            f.write(
-                "  ULTIMATE CORS SCANNER v3.0 - VULNERABILITY REPORT\n"
-            )
-            f.write(
-                f"  Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            )
-            f.write(
-                f"  Total Findings: "
-                f"{sum(len(v) for v in url_groups.values())}\n"
-            )
-            f.write(f"  Vulnerable URLs: {len(url_groups)}\n")
-            f.write("=" * 73 + "\n")
+                # ═══ HEADER ═══
+                f.write("=" * 75 + "\n")
+                f.write("    ULTIMATE CORS SCANNER v3.0 - VULNERABILITY REPORT\n")
+                f.write("=" * 75 + "\n")
+                f.write(f"  Generated    : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"  Total URLs   : {len(url_groups)}\n")
+                f.write(f"  Total Vulns  : {len(vuln_results)}\n")
 
-            url_count = 0
-            for url, findings in url_groups.items():
-                url_count += 1
-                if url_count > 1:
-                    f.write("\n" + "=" * 73 + "\n\n")
+                # Severity counts
+                sev_counts = defaultdict(int)
+                for r in vuln_results:
+                    sev_counts[r['severity']] += 1
+                f.write(f"  Critical     : {sev_counts.get('CRITICAL', 0)}\n")
+                f.write(f"  High         : {sev_counts.get('HIGH', 0)}\n")
+                f.write(f"  Medium       : {sev_counts.get('MEDIUM', 0)}\n")
+                f.write(f"  Low          : {sev_counts.get('LOW', 0)}\n")
+                f.write(f"  Info         : {sev_counts.get('INFO', 0)}\n")
+                f.write("=" * 75 + "\n\n")
 
-                f.write(f"TARGET: {url}\n")
-                f.write(f"FINDINGS: {len(findings)}\n")
-                f.write("-" * 73 + "\n")
+                # ═══ EACH URL SECTION ═══
+                url_count = 0
+                for url, findings in url_groups.items():
+                    url_count += 1
 
-                for i, r in enumerate(findings, 1):
-                    f.write(f"\n  [{i}] {r['test_name']}\n")
-                    f.write(f"      Severity      : {r['severity']}\n")
-                    f.write(f"      Category      : {r['category']}\n")
-                    f.write(f"      Vuln Type     : {r.get('vuln_type', 'N/A')}\n")
-                    f.write(f"      Origin Sent   : {r['origin_sent']}\n")
+                    # ═══ SEPARATOR BETWEEN URLs ═══
+                    if url_count > 1:
+                        f.write("\n")
+                        f.write("=" * 75 + "\n")
+                        f.write("=" * 75 + "\n")
+                        f.write("\n")
 
-                    # All CORS response headers
-                    f.write(f"      Response CORS Headers:\n")
-                    cors_h = r.get('all_cors_headers', {})
-                    if cors_h:
-                        for h, v in cors_h.items():
-                            if v:
-                                marker = ''
-                                if h == 'Access-Control-Allow-Origin':
-                                    if v == r.get('origin_sent', ''):
-                                        marker = ' ← REFLECTED!'
-                                    elif v == '*':
-                                        marker = ' ← WILDCARD!'
-                                    elif v.lower() == 'null':
-                                        marker = ' ← NULL!'
-                                elif h == 'Access-Control-Allow-Credentials':
-                                    if v.lower() == 'true':
-                                        marker = ' ← DANGEROUS!'
-                                elif h == 'Vary':
-                                    if 'origin' not in v.lower():
-                                        marker = ' ← Missing Origin!'
-                                f.write(f"        {h}: {v}{marker}\n")
-                    else:
-                        f.write(f"        ACAO: {r['acao_header']}\n")
-                        if r.get('acac_header'):
-                            f.write(f"        ACAC: {r['acac_header']}\n")
+                    # URL Header
+                    f.write(f"TARGET URL: {url}\n")
+                    f.write(f"FINDINGS  : {len(findings)} vulnerabilities\n")
+                    f.write("-" * 75 + "\n")
 
-                    if r.get('origin_triggered_cors'):
-                        f.write(
-                            f"      ⚡ Origin TRIGGERED CORS "
-                            f"(no CORS in baseline)\n"
-                        )
-
-                    if r.get('credentials_allowed'):
-                        f.write(f"      ⚠ Credentials  : ALLOWED\n")
-                    if r.get('wildcard'):
-                        f.write(f"      ⚠ Wildcard     : YES (*)\n")
-                    if r.get('vary_origin_missing'):
-                        f.write(
-                            f"      ⚠ Vary: Origin : MISSING "
-                            f"(Cache Poisoning)\n"
-                        )
-                    if r.get('dangerous_methods'):
-                        methods = r.get('dangerous_methods_list', [])
-                        f.write(
-                            f"      ⚠ Methods      : "
-                            f"{', '.join(methods)}\n"
-                        )
-                    if r.get('sensitive_headers_exposed'):
-                        hdrs = r.get('sensitive_headers_list', [])
-                        f.write(
-                            f"      ⚠ Exposed Hdrs : "
-                            f"{', '.join(hdrs)}\n"
-                        )
-
-                    # Response analysis
-                    analysis = r.get('response_analysis', [])
-                    if analysis:
-                        f.write(f"      Response Analysis:\n")
-                        for line in analysis:
-                            f.write(f"        • {line}\n")
-
-                    f.write(f"      Status Code   : {r['status_code']}\n")
-                    f.write(f"      Description   : {r['description']}\n")
-                    f.write(f"      Impact        : {r.get('impact', 'N/A')}\n")
-                    f.write(
-                        f"      Remediation   : "
-                        f"{r.get('remediation', 'N/A')}\n"
+                    # Sort by severity
+                    sev_order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3, 'INFO': 4}
+                    findings_sorted = sorted(
+                        findings,
+                        key=lambda x: sev_order.get(x.get('severity', 'INFO'), 5)
                     )
 
-            f.write("\n" + "=" * 73 + "\n")
-            f.write("  END OF REPORT\n")
-            f.write("=" * 73 + "\n")
+                    for i, r in enumerate(findings_sorted, 1):
+                        f.write(f"\n")
+                        f.write(f"  [{i}] {r['test_name']}\n")
+                        f.write(f"  " + "-" * 50 + "\n")
+                        f.write(f"      Severity       : {r['severity']}\n")
+                        f.write(f"      Category       : {r['category']}\n")
+                        f.write(f"      Vuln Type      : {r.get('vuln_type', 'N/A')}\n")
+                        f.write(f"      Origin Sent    : {r['origin_sent']}\n")
+                        f.write(f"      Status Code    : {r['status_code']}\n")
 
-        safe_print(
-            f"{Colors.GREEN}[✓] TXT Report: {filename}{Colors.END}"
-        )
+                        # ─── Response CORS Headers ───
+                        f.write(f"      Response CORS Headers:\n")
+                        cors_h = r.get('all_cors_headers', {})
+                        if cors_h:
+                            for h, v in cors_h.items():
+                                if v:
+                                    marker = ''
+                                    if h == 'Access-Control-Allow-Origin':
+                                        if v == r.get('origin_sent', ''):
+                                            marker = '  <-- REFLECTED!'
+                                        elif v == '*':
+                                            marker = '  <-- WILDCARD!'
+                                        elif v.lower() == 'null':
+                                            marker = '  <-- NULL!'
+                                    elif h == 'Access-Control-Allow-Credentials':
+                                        if v.lower() == 'true':
+                                            marker = '  <-- DANGEROUS!'
+                                    elif h == 'Vary':
+                                        if 'origin' not in v.lower():
+                                            marker = '  <-- Missing Origin!'
+                                    f.write(f"        {h}: {v}{marker}\n")
+                        else:
+                            f.write(f"        ACAO: {r.get('acao_header', 'N/A')}\n")
+                            if r.get('acac_header'):
+                                f.write(f"        ACAC: {r['acac_header']}\n")
+
+                        # ─── Warning Flags ───
+                        if r.get('origin_triggered_cors'):
+                            f.write(f"      [!] Origin TRIGGERED CORS (no CORS in baseline)\n")
+
+                        if r.get('credentials_allowed'):
+                            f.write(f"      [!] CREDENTIALS: ALLOWED - cookies/auth sent cross-origin!\n")
+
+                        if r.get('wildcard'):
+                            f.write(f"      [!] WILDCARD: YES (*)\n")
+
+                        if r.get('vary_origin_missing'):
+                            f.write(f"      [!] Vary: Origin MISSING (Cache Poisoning Risk)\n")
+
+                        if r.get('dangerous_methods'):
+                            methods = r.get('dangerous_methods_list', [])
+                            f.write(f"      [!] Dangerous Methods: {', '.join(methods)}\n")
+
+                        if r.get('sensitive_headers_exposed'):
+                            hdrs = r.get('sensitive_headers_list', [])
+                            f.write(f"      [!] Sensitive Headers Exposed: {', '.join(hdrs)}\n")
+
+                        # ─── Response Analysis (WHY vulnerable) ───
+                        analysis = r.get('response_analysis', [])
+                        if analysis:
+                            f.write(f"      Response Analysis:\n")
+                            for line in analysis:
+                                f.write(f"        * {line}\n")
+
+                        # ─── Details ───
+                        f.write(f"      Description    : {r.get('description', 'N/A')}\n")
+                        f.write(f"      Impact         : {r.get('impact', 'N/A')}\n")
+                        f.write(f"      Remediation    : {r.get('remediation', 'N/A')}\n")
+                        f.write(f"      Timestamp      : {r.get('timestamp', 'N/A')}\n")
+
+                # ═══ FOOTER ═══
+                f.write("\n")
+                f.write("=" * 75 + "\n")
+                f.write("=" * 75 + "\n")
+                f.write("    END OF REPORT\n")
+                f.write(f"    Generated by CORS Scanner v3.0\n")
+                f.write(f"    {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("=" * 75 + "\n")
+
+            # Verify file was written
+            file_size = os.path.getsize(filename)
+            safe_print(f"\n{Colors.GREEN}{Colors.BOLD}[+] Report saved successfully!{Colors.END}")
+            safe_print(f"{Colors.GREEN}    File: {os.path.abspath(filename)}{Colors.END}")
+            safe_print(f"{Colors.GREEN}    Size: {file_size} bytes{Colors.END}")
+            safe_print(f"{Colors.GREEN}    URLs: {len(url_groups)}{Colors.END}")
+            safe_print(f"{Colors.GREEN}    Findings: {len(vuln_results)}{Colors.END}")
+            return True
+
+        except PermissionError:
+            safe_print(f"{Colors.RED}[ERROR] Permission denied: Cannot write to {filename}{Colors.END}")
+            safe_print(f"{Colors.YELLOW}[TIP] Try: python3 cors_scanner.py ... -o /tmp/report.txt{Colors.END}")
+            return False
+        except Exception as e:
+            safe_print(f"{Colors.RED}[ERROR] Failed to write report: {str(e)}{Colors.END}")
+            return False
 
     # ══════════════════════════════════════════
     # FINAL SUMMARY
     # ══════════════════════════════════════════
     def print_summary(self):
-        safe_print(f"\n{'═' * 60}")
-        safe_print(
-            f"{Colors.BOLD}{Colors.CYAN}"
-            f"              SCAN SUMMARY"
-            f"{Colors.END}"
-        )
-        safe_print(f"{'═' * 60}")
+        safe_print(f"\n{'=' * 60}")
+        safe_print(f"{Colors.BOLD}{Colors.CYAN}              SCAN SUMMARY{Colors.END}")
+        safe_print(f"{'=' * 60}")
 
         duration = "N/A"
         if self.stats.start_time and self.stats.end_time:
             duration = str(self.stats.end_time - self.stats.start_time)
 
-        safe_print(f"  Duration: {duration}")
-        safe_print(f"  URLs Scanned: {self.stats.total_urls or 1}")
-        safe_print(f"  Total Tests: {self.stats.total_tests}")
-        safe_print(f"  Errors: {self.stats.errors}")
-        safe_print(f"  Timeouts: {self.stats.timeouts}")
+        safe_print(f"  Duration        : {duration}")
+        safe_print(f"  URLs Scanned    : {self.stats.total_urls or 1}")
+        safe_print(f"  Total Tests     : {self.stats.total_tests}")
+        safe_print(f"  Errors          : {self.stats.errors}")
+        safe_print(f"  Timeouts        : {self.stats.timeouts}")
 
-        safe_print(f"\n  {'─' * 40}")
+        safe_print(f"\n  {'-' * 40}")
         safe_print(f"  VULNERABILITIES FOUND:")
-        safe_print(f"  {'─' * 40}")
+        safe_print(f"  {'-' * 40}")
 
-        safe_print(
-            f"  {Colors.RED}🔴 Critical: "
-            f"{self.stats.critical}{Colors.END}"
-        )
-        safe_print(
-            f"  {Colors.RED}🟠 High: "
-            f"{self.stats.high}{Colors.END}"
-        )
-        safe_print(
-            f"  {Colors.YELLOW}🟡 Medium: "
-            f"{self.stats.medium}{Colors.END}"
-        )
-        safe_print(
-            f"  {Colors.CYAN}🔵 Low: "
-            f"{self.stats.low}{Colors.END}"
-        )
-        safe_print(
-            f"  {Colors.WHITE}⚪ Info: "
-            f"{self.stats.info}{Colors.END}"
-        )
-        safe_print(f"  {'─' * 40}")
-        safe_print(
-            f"  {Colors.BOLD}TOTAL: "
-            f"{self.stats.total_vulns}{Colors.END}"
-        )
+        safe_print(f"  {Colors.RED}[!!!] Critical : {self.stats.critical}{Colors.END}")
+        safe_print(f"  {Colors.RED}[!!]  High     : {self.stats.high}{Colors.END}")
+        safe_print(f"  {Colors.YELLOW}[!]   Medium   : {self.stats.medium}{Colors.END}")
+        safe_print(f"  {Colors.CYAN}[*]   Low      : {self.stats.low}{Colors.END}")
+        safe_print(f"  {Colors.WHITE}[i]   Info     : {self.stats.info}{Colors.END}")
+        safe_print(f"  {'-' * 40}")
+        safe_print(f"  {Colors.BOLD}TOTAL: {self.stats.total_vulns}{Colors.END}")
 
-        if self.results:
-            vuln_urls = set(r['url'] for r in self.results)
-            safe_print(
-                f"\n  {Colors.RED}{Colors.BOLD}"
-                f"Vulnerable URLs ({len(vuln_urls)}):"
-                f"{Colors.END}"
-            )
+        # Thread-safe read
+        with results_lock:
+            results_copy = list(self.results)
+
+        if results_copy:
+            vuln_urls = set(r['url'] for r in results_copy if r.get('vulnerable'))
+            safe_print(f"\n  {Colors.RED}{Colors.BOLD}Vulnerable URLs ({len(vuln_urls)}):{Colors.END}")
             sev_order = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']
             for url in vuln_urls:
-                url_vulns = [r for r in self.results if r['url'] == url]
+                url_vulns = [r for r in results_copy if r['url'] == url and r.get('vulnerable')]
                 max_sev = 'INFO'
                 for r in url_vulns:
                     if sev_order.index(r['severity']) < sev_order.index(max_sev):
                         max_sev = r['severity']
-                safe_print(
-                    f"    • [{max_sev}] {url} ({len(url_vulns)} findings)"
-                )
+                safe_print(f"    * [{max_sev}] {url} ({len(url_vulns)} findings)")
 
             categories = defaultdict(int)
-            for r in self.results:
-                categories[r['category']] += 1
-            safe_print(
-                f"\n  {Colors.CYAN}Findings by Category:{Colors.END}"
-            )
-            for cat, count in sorted(
-                categories.items(), key=lambda x: x[1], reverse=True
-            ):
-                safe_print(f"    • {cat}: {count}")
+            for r in results_copy:
+                if r.get('vulnerable'):
+                    categories[r['category']] += 1
+            safe_print(f"\n  {Colors.CYAN}Findings by Category:{Colors.END}")
+            for cat, count in sorted(categories.items(), key=lambda x: x[1], reverse=True):
+                safe_print(f"    * {cat}: {count}")
 
-        safe_print(f"{'═' * 60}\n")
+        safe_print(f"{'=' * 60}\n")
 
 
 # ══════════════════════════════════════════════════════
@@ -2220,104 +1934,33 @@ def main():
         description='Ultimate CORS Misconfiguration Scanner v3.0',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EXAMPLES:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Basic scan:
-    python3 cors_scanner.py -u https://example.com
-
-  With output:
-    python3 cors_scanner.py -u https://example.com -o report.txt
-
-  URL list:
-    python3 cors_scanner.py -l urls.txt -t 20 -o results.txt
-
-  Custom headers:
-    python3 cors_scanner.py -u https://api.target.com \\
-      -H "X-Api-Key: secret123" -H "X-Custom: value"
-
-  Authentication:
-    python3 cors_scanner.py -u https://api.target.com \\
-      --auth "Bearer eyJhbG..."
-
-  Through proxy:
-    python3 cors_scanner.py -u https://target.com \\
-      --proxy http://127.0.0.1:8080
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Examples:
+  python3 cors_scanner.py -u https://example.com
+  python3 cors_scanner.py -u https://example.com -o report.txt
+  python3 cors_scanner.py -l urls.txt -t 20 -o results.txt
+  python3 cors_scanner.py -u https://api.target.com --auth "Bearer token"
+  python3 cors_scanner.py -u https://target.com --proxy http://127.0.0.1:8080
 """
     )
 
-    # Target Options
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument('-u', '--url', help='Single URL to scan')
     target.add_argument('-l', '--list', help='File with URLs')
 
-    # Scan Options
-    parser.add_argument(
-        '-t', '--threads', type=int, default=10,
-        help='Thread count (default: 10)'
-    )
-    parser.add_argument(
-        '--timeout', type=int, default=10,
-        help='Request timeout seconds (default: 10)'
-    )
-    parser.add_argument(
-        '--delay', type=float, default=0,
-        help='Delay between tests (default: 0)'
-    )
-    parser.add_argument(
-        '-v', '--verbose', action='store_true',
-        help='Show all results including safe'
-    )
-
-    # Authentication
-    parser.add_argument(
-        '--auth', help='Authorization header value'
-    )
-    parser.add_argument(
-        '--cookie', help='Cookie header value'
-    )
-
-    # Custom Headers
-    parser.add_argument(
-        '-H', '--header', action='append', dest='headers',
-        help='Custom header (e.g., -H "X-Api-Key: value")'
-    )
-
-    # Proxy
-    parser.add_argument(
-        '--proxy', help='Proxy URL (e.g., http://127.0.0.1:8080)'
-    )
-
-    # Output
-    parser.add_argument(
-        '-o', '--output', help='Output TXT filename'
-    )
-
-    # Skip Options
-    parser.add_argument(
-        '--skip-methods', action='store_true',
-        help='Skip HTTP method variation tests'
-    )
-    parser.add_argument(
-        '--skip-websocket', action='store_true',
-        help='Skip WebSocket CORS tests'
-    )
-    parser.add_argument(
-        '--skip-cache', action='store_true',
-        help='Skip cache poisoning tests'
-    )
-
-    # Redirect Options
-    parser.add_argument(
-        '--no-redirect', action='store_true',
-        help='Do not follow redirects'
-    )
-    parser.add_argument(
-        '--max-redirects', type=int, default=5,
-        help='Max redirects (default: 5)'
-    )
+    parser.add_argument('-t', '--threads', type=int, default=10, help='Threads (default: 10)')
+    parser.add_argument('--timeout', type=int, default=10, help='Timeout seconds (default: 10)')
+    parser.add_argument('--delay', type=float, default=0, help='Delay between tests (default: 0)')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
+    parser.add_argument('--auth', help='Authorization header value')
+    parser.add_argument('--cookie', help='Cookie header value')
+    parser.add_argument('-H', '--header', action='append', dest='headers', help='Custom header')
+    parser.add_argument('--proxy', help='Proxy URL')
+    parser.add_argument('-o', '--output', help='Output TXT filename')
+    parser.add_argument('--skip-methods', action='store_true', help='Skip method tests')
+    parser.add_argument('--skip-websocket', action='store_true', help='Skip WebSocket tests')
+    parser.add_argument('--skip-cache', action='store_true', help='Skip cache tests')
+    parser.add_argument('--no-redirect', action='store_true', help='No redirects')
+    parser.add_argument('--max-redirects', type=int, default=5, help='Max redirects')
 
     args = parser.parse_args()
 
@@ -2343,42 +1986,34 @@ EXAMPLES:
     scanner = UltimateCORSScanner(config)
 
     # Print Config
-    safe_print(f"{Colors.CYAN}[Configuration]{Colors.END}")
-    safe_print(f"  Threads: {config['threads']}")
-    safe_print(f"  Timeout: {config['timeout']}s")
-    safe_print(f"  Delay: {config['delay']}s")
-    safe_print(f"  Auth: {'Set' if config['auth'] else 'None'}")
-    safe_print(f"  Cookie: {'Set' if config['cookie'] else 'None'}")
-    safe_print(f"  Proxy: {config['proxy'] or 'None'}")
+    safe_print(f"\n{Colors.CYAN}[Configuration]{Colors.END}")
+    safe_print(f"  Threads     : {config['threads']}")
+    safe_print(f"  Timeout     : {config['timeout']}s")
+    safe_print(f"  Delay       : {config['delay']}s")
+    safe_print(f"  Auth        : {'Set' if config['auth'] else 'None'}")
+    safe_print(f"  Cookie      : {'Set' if config['cookie'] else 'None'}")
+    safe_print(f"  Proxy       : {config['proxy'] or 'None'}")
+    safe_print(f"  Output      : {args.output or 'Terminal only (use -o to save)'}")
 
     if custom_headers:
-        safe_print(f"  Custom Headers: {len(custom_headers)}")
+        safe_print(f"  Headers     : {len(custom_headers)}")
         for k, v in custom_headers.items():
-            safe_print(f"    • {k}: {v}")
-    else:
-        safe_print(f"  Custom Headers: None")
+            safe_print(f"    * {k}: {v}")
 
-    safe_print(
-        f"  Method Tests: "
-        f"{'Yes' if config['test_methods'] else 'Skipped'}"
-    )
-    safe_print(
-        f"  WebSocket Tests: "
-        f"{'Yes' if config['test_websocket'] else 'Skipped'}"
-    )
-    safe_print(
-        f"  Cache Tests: "
-        f"{'Yes' if config['test_cache'] else 'Skipped'}"
-    )
-    safe_print(f"  Output: {args.output or 'Terminal only'}")
+    safe_print(f"  Methods     : {'Yes' if config['test_methods'] else 'Skipped'}")
+    safe_print(f"  WebSocket   : {'Yes' if config['test_websocket'] else 'Skipped'}")
+    safe_print(f"  Cache       : {'Yes' if config['test_cache'] else 'Skipped'}")
 
-    # Start Scanning
+    # ─── No output warning ───
+    if not args.output:
+        safe_print(f"\n{Colors.YELLOW}[WARNING] No output file specified!{Colors.END}")
+        safe_print(f"{Colors.YELLOW}  Use -o report.txt to save results{Colors.END}")
+
+    # Start
     scanner.stats.start_time = datetime.now()
 
     def signal_handler(sig, frame):
-        safe_print(
-            f"\n{Colors.YELLOW}[!] Scan interrupted{Colors.END}"
-        )
+        safe_print(f"\n{Colors.YELLOW}[!] Scan interrupted by user{Colors.END}")
         scanner.stats.end_time = datetime.now()
         scanner.print_summary()
         if args.output:
@@ -2387,6 +2022,7 @@ EXAMPLES:
 
     signal.signal(signal.SIGINT, signal_handler)
 
+    # Scan
     if args.url:
         scanner.stats.total_urls = 1
         scanner.scan_url(args.url)
@@ -2398,17 +2034,30 @@ EXAMPLES:
     # Summary
     scanner.print_summary()
 
-    # Report
+    # ─── REPORT GENERATION ───
+    # Always try to save if output specified
     if args.output:
-        safe_print(
-            f"{Colors.CYAN}[*] Generating TXT report...{Colors.END}"
-        )
-        scanner.generate_txt_report(filename=args.output)
+        safe_print(f"\n{Colors.CYAN}[*] Generating TXT report...{Colors.END}")
+        success = scanner.generate_txt_report(filename=args.output)
+        if not success:
+            safe_print(f"{Colors.YELLOW}[*] No vulnerabilities to report{Colors.END}")
+    else:
+        # Check if there are results and suggest saving
+        with results_lock:
+            has_results = len(scanner.results) > 0
+        if has_results:
+            safe_print(f"\n{Colors.YELLOW}[TIP] Vulnerabilities found but not saved!{Colors.END}")
+            safe_print(f"{Colors.YELLOW}  Run again with -o report.txt to save results{Colors.END}")
 
-    safe_print(
-        f"\n{Colors.GREEN}{Colors.BOLD}"
-        f"[✓] Scan complete!{Colors.END}"
-    )
+            # Auto-save option
+            try:
+                auto_file = f"cors_auto_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                safe_print(f"\n{Colors.CYAN}[*] Auto-saving to {auto_file}...{Colors.END}")
+                scanner.generate_txt_report(filename=auto_file)
+            except Exception:
+                pass
+
+    safe_print(f"\n{Colors.GREEN}{Colors.BOLD}[+] Scan complete!{Colors.END}")
 
 
 if __name__ == '__main__':
