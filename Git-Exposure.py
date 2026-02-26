@@ -50,7 +50,6 @@ except ImportError:
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-
 # ═══════════════════════════════════════════════════════════════
 # COLORS
 # ═══════════════════════════════════════════════════════════════
@@ -69,7 +68,6 @@ class Colors:
     GRAY = '\033[0;37m'
     RESET = '\033[0m'
     BOLD = '\033[1m'
-
 
 # ═══════════════════════════════════════════════════════════════
 # SENSITIVE PATHS - EXPANDED & ORGANIZED
@@ -91,20 +89,29 @@ SENSITIVE_PATHS = {
         "/wp-config.php", "/wp-config.php.bak",
         "/.config", "/api/.config", "/admin/.config",
         "/database.yml", "/secrets.yml",
+        "/vercel.json", "/.toml", "/manifest.json",
     ],
     "backup_files": [
         "/backup.zip", "/backup.sql", "/database.sql",
         "/db.sql", "/dump.sql", "/site.zip",
+        "/index.html~", "/index_bak.html",
     ],
     "debug_info": [
         "/phpinfo.php", "/info.php", "/.htaccess",
         "/error_log", "/debug.log",
+        "/.DS_Store", "/.vscode/", "/.idea/",
     ],
     "api_keys": [
         "/swagger.json", "/openapi.json", "/graphql",
     ],
     "credentials": [
         "/.ssh/id_rsa", "/credentials.json", "/secrets.yml",
+    ],
+    "metadata_files": [
+        "/robots.txt", "/sitemap.xml", "/security.txt",
+    ],
+    "cloud_configs": [
+        "/s3.amazonaws.com/", "/cloudfront.net/",
     ],
 }
 
@@ -127,8 +134,7 @@ SECRET_PATTERNS = {
     }
 }
 
-
-# ═══════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
 # PROGRESS BAR
 # ═══════════════════════════════════════════════════════════════
 class ProgressBar:
@@ -154,7 +160,6 @@ class ProgressBar:
         if self.current >= self.total:
             print()
 
-
 # ═══════════════════════════════════════════════════════════════
 # MAIN SCANNER - COMPLETE CHAIN VERSION
 # ═══════════════════════════════════════════════════════════════
@@ -164,13 +169,13 @@ class GitExposerCompleteChain:
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = f"gitexposer_complete_{domain}_{self.timestamp}"
         self.repos_dir = os.path.join(self.output_dir, "downloaded_repos")
-        
+
         # Data structures
         self.subdomains = set()
         self.all_urls = set()
         self.live_urls = set()
         self.live_subdomains = set()  # NEW: Track which subdomains are actually live
-        
+
         self.results = {
             "CRITICAL": [],
             "HIGH": [],
@@ -181,7 +186,7 @@ class GitExposerCompleteChain:
         self.git_repos_found = []
         self.scanned_count = 0
         self.found_count = 0
-        
+
         # Session
         self.session = requests.Session()
         self.session.headers.update({
@@ -190,7 +195,7 @@ class GitExposerCompleteChain:
         self.session.verify = False
         self.session.timeout = 8
         self.lock = threading.Lock()
-        
+
         # Stats
         self.stats = {
             'subdomains_found': 0,
@@ -225,7 +230,7 @@ class GitExposerCompleteChain:
         print(banner)
 
     def print_status(self, msg, status="info"):
-        colors = {"info": Colors.INFO, "success": Colors.SUCCESS, 
+        colors = {"info": Colors.INFO, "success": Colors.SUCCESS,
                   "warning": Colors.WARNING, "error": Colors.ERROR}
         icons = {"info": "ℹ", "success": "✔", "warning": "⚠", "error": "✘"}
         color = colors.get(status, Colors.INFO)
@@ -239,7 +244,7 @@ class GitExposerCompleteChain:
 
     def _check_tool(self, tool_name):
         try:
-            result = subprocess.run(['which', tool_name], 
+            result = subprocess.run(['which', tool_name],
                                   capture_output=True, text=True, timeout=5)
             return result.returncode == 0
         except:
@@ -257,7 +262,7 @@ class GitExposerCompleteChain:
             self.print_status("Running subfinder...", "info")
             try:
                 result = subprocess.run(
-                    ['subfinder', '-d', self.domain, '-silent', '-all'],
+                    ['subfinder', '-d', self.domain, '-silent'],
                     capture_output=True, text=True, timeout=90
                 )
                 for line in result.stdout.strip().split('\n'):
@@ -283,16 +288,62 @@ class GitExposerCompleteChain:
         except:
             self.print_status("crt.sh skipped", "warning")
 
-        self.subdomains = subdomains
-        self.stats['subdomains_found'] = len(subdomains)
+        # Filter subdomains to only include those that resolve to an IP address or are live
+        filtered_subdomains = set()
+        self.print_status(f"Filtering {len(subdomains)} subdomains...", "info")
+        with ThreadPoolExecutor(max_workers=30) as executor:
+            futures = {executor.submit(self._validate_subdomain, sub): sub for sub in subdomains}
+            for future in as_completed(futures):
+                subdomain = futures[future]
+                try:
+                    is_valid = future.result()
+                    if is_valid:
+                        filtered_subdomains.add(subdomain)
+                except:
+                    pass
+
+        self.subdomains = filtered_subdomains
+        self.stats['subdomains_found'] = len(filtered_subdomains)
 
         # Save
         with open(os.path.join(self.output_dir, "subdomains.txt"), 'w') as f:
-            for sub in sorted(subdomains):
+            for sub in sorted(filtered_subdomains):
                 f.write(sub + '\n')
 
-        self.print_status(f"Total unique subdomains: {Colors.WHITE}{len(subdomains)}{Colors.RESET}", "success")
-        return subdomains
+        self.print_status(f"Total unique subdomains: {Colors.WHITE}{len(filtered_subdomains)}{Colors.RESET}", "success")
+        return filtered_subdomains
+
+    def _validate_subdomain(self, subdomain):
+        """Validate if a subdomain is live or resolves to an IP address."""
+        try:
+            # Check if subdomain resolves to an IP address
+            result = subprocess.run(
+                ['dig', '+short', subdomain],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.stdout.strip():
+                return True
+
+            # Check if subdomain is live using HTTP request
+            url = f"http://{subdomain}"
+            try:
+                resp = self.session.get(url, timeout=5)
+                if resp.status_code < 500:
+                    return True
+            except:
+                pass
+
+            url = f"https://{subdomain}"
+            try:
+                resp = self.session.get(url, timeout=5)
+                if resp.status_code < 500:
+                    return True
+            except:
+                pass
+
+            return False
+        except:
+            return False
 
     # ═══════════════════════════════════════════════════════════════
     # PHASE 2: BATCH URL COLLECTION (SMART BATCHING)
@@ -321,9 +372,9 @@ class GitExposerCompleteChain:
                     subs_input = '\n'.join(batch)
                     result = subprocess.run(
                         ['waybackurls'],
-                        input=subs_input, 
-                        capture_output=True, 
-                        text=True, 
+                        input=subs_input,
+                        capture_output=True,
+                        text=True,
                         timeout=30  # 30s per batch
                     )
                     for line in result.stdout.strip().split('\n'):
@@ -343,9 +394,9 @@ class GitExposerCompleteChain:
                     subs_input = '\n'.join(batch)
                     result = subprocess.run(
                         ['gau', '--threads', '3', '--timeout', '5'],
-                        input=subs_input, 
-                        capture_output=True, 
-                        text=True, 
+                        input=subs_input,
+                        capture_output=True,
+                        text=True,
                         timeout=30
                     )
                     for line in result.stdout.strip().split('\n'):
@@ -373,7 +424,7 @@ class GitExposerCompleteChain:
     # ═══════════════════════════════════════════════════════════════
     def find_all_live_hosts(self):
         self.print_section("PHASE 3: Comprehensive Live Host Detection")
-        
+
         # Create targets for ALL subdomains
         targets = set()
         for sub in self.subdomains:
@@ -391,24 +442,24 @@ class GitExposerCompleteChain:
                 with open(temp_file, 'w') as f:
                     for target in targets:
                         f.write(target + '\n')
-                
+
                 result = subprocess.run(
                     ['httpx', '-l', temp_file, '-silent', '-no-color', '-threads', '100', '-timeout', '5'],
-                    capture_output=True, 
-                    text=True, 
+                    capture_output=True,
+                    text=True,
                     timeout=180
                 )
-                
+
                 for line in result.stdout.strip().split('\n'):
                     if line.strip():
                         self.live_urls.add(line.strip())
                         # Extract subdomain
                         subdomain = urlparse(line.strip()).netloc
                         self.live_subdomains.add(subdomain)
-                
+
                 os.remove(temp_file)
                 self.print_status(f"httpx: {len(self.live_urls)} live URLs from {len(self.live_subdomains)} subdomains", "success")
-                
+
             except Exception as e:
                 self.print_status("httpx timeout, using manual check...", "warning")
                 self._manual_comprehensive_check(targets)
@@ -426,7 +477,7 @@ class GitExposerCompleteChain:
         with open(os.path.join(self.output_dir, "live_urls.txt"), 'w') as f:
             for url in sorted(self.live_urls):
                 f.write(url + '\n')
-        
+
         with open(os.path.join(self.output_dir, "live_subdomains.txt"), 'w') as f:
             for sub in sorted(self.live_subdomains):
                 f.write(sub + '\n')
@@ -438,14 +489,14 @@ class GitExposerCompleteChain:
         """Manual live check with batching"""
         self.print_status(f"Manually checking {len(targets)} URLs...", "info")
         progress = ProgressBar(len(targets), 'Checking:')
-        
+
         # Batch processing
         target_list = list(targets)
         batch_size = 50
-        
+
         for i in range(0, len(target_list), batch_size):
             batch = target_list[i:i + batch_size]
-            
+
             with ThreadPoolExecutor(max_workers=30) as executor:
                 futures = {executor.submit(self._check_live, url): url for url in batch}
                 for future in as_completed(futures):
@@ -455,7 +506,7 @@ class GitExposerCompleteChain:
                         self.live_urls.add(result)
                         subdomain = urlparse(result).netloc
                         self.live_subdomains.add(subdomain)
-        
+
         self.print_status(f"Found {len(self.live_urls)} live URLs", "success")
 
     def _check_live(self, url):
@@ -472,9 +523,9 @@ class GitExposerCompleteChain:
     # ═══════════════════════════════════════════════════════════════
     def detect_git_exposure_comprehensive(self):
         self.print_section("PHASE 4: Git Repository Detection (All Live Hosts)")
-        
+
         git_targets = [f"{url.rstrip('/')}/.git/HEAD" for url in self.live_urls]
-        
+
         self.print_status(f"Checking {len(git_targets)} URLs for .git exposure...", "info")
         progress = ProgressBar(len(git_targets), 'Scanning:')
 
@@ -487,7 +538,7 @@ class GitExposerCompleteChain:
                     self.git_repos_found.append(result)
                     self._print_git_finding(result)
 
-        self.print_status(f"Found {len(self.git_repos_found)} exposed Git repositories!", 
+        self.print_status(f"Found {len(self.git_repos_found)} exposed Git repositories!",
                          "success" if self.git_repos_found else "info")
 
         if self.git_repos_found:
@@ -544,11 +595,11 @@ class GitExposerCompleteChain:
 
         self.print_status(f"Scanning {len(all_paths)} paths across {len(self.live_urls)} hosts", "info")
         self.print_status(f"Total scan requests: {Colors.WHITE}{len(scan_tasks)}{Colors.RESET}", "info")
-        
+
         progress = ProgressBar(len(scan_tasks), 'Scanning:')
 
         with ThreadPoolExecutor(max_workers=50) as executor:
-            futures = {executor.submit(self._check_path, task[0], task[1], progress): task 
+            futures = {executor.submit(self._check_path, task[0], task[1], progress): task
                       for task in scan_tasks}
             for future in as_completed(futures):
                 try:
@@ -567,7 +618,7 @@ class GitExposerCompleteChain:
 
             if resp.status_code == 200:
                 content = resp.text
-                
+
                 if len(content) < 10:
                     return
 
@@ -704,6 +755,285 @@ class GitExposerCompleteChain:
                     print(f"  {color}║{Colors.RESET}    {line[:62]}")
         print(f"  {color}╚{'═' * 70}╝{Colors.RESET}")
 
+    def check_https_enforcement(self, url):
+        """Check if HTTP redirects to HTTPS and HSTS header is present."""
+        try:
+            # Check HTTP to HTTPS redirect
+            http_url = url.replace("https://", "http://")
+            resp = self.session.get(http_url, timeout=8, allow_redirects=False)
+            if resp.status_code == 301 and resp.headers.get('Location', '').startswith('https://'):
+                https_enforcement = True
+            else:
+                https_enforcement = False
+
+            # Check HSTS
+            resp = self.session.get(url, timeout=8)
+            hsts = 'Strict-Transport-Security' in resp.headers
+
+            return {
+                'https_enforcement': https_enforcement,
+                'hsts': hsts
+            }
+        except Exception as e:
+            return {
+                'https_enforcement': False,
+                'hsts': False
+            }
+
+    def check_security_headers(self, url):
+        """Check for security headers."""
+        try:
+            resp = self.session.get(url, timeout=8)
+            headers = resp.headers
+            return {
+                'x_frame_options': 'X-Frame-Options' in headers,
+                'x_content_type_options': 'X-Content-Type-Options' in headers,
+                'content_security_policy': 'Content-Security-Policy' in headers
+            }
+        except Exception as e:
+            return {
+                'x_frame_options': False,
+                'x_content_type_options': False,
+                'content_security_policy': False
+            }
+
+    def check_cookie_security(self, url):
+        """Check for cookie security flags."""
+        try:
+            resp = self.session.get(url, timeout=8)
+            cookies = resp.cookies
+            secure_cookies = all(cookie.secure for cookie in cookies)
+            http_only_cookies = all(cookie.has_nonstandard_attr('HttpOnly') for cookie in cookies)
+            return {
+                'secure_cookies': secure_cookies,
+                'http_only_cookies': http_only_cookies
+            }
+        except Exception as e:
+            return {
+                'secure_cookies': False,
+                'http_only_cookies': False
+            }
+
+    def check_cors(self, url):
+        """Check for CORS settings."""
+        try:
+            headers = {'Origin': 'https://evil.com'}
+            resp = self.session.get(url, headers=headers, timeout=8)
+            cors_headers = resp.headers.get('Access-Control-Allow-Origin', '')
+            allow_origin = cors_headers == '*' or cors_headers == 'https://evil.com'
+            allow_methods = resp.headers.get('Access-Control-Allow-Methods', '')
+            dangerous_methods = any(method in allow_methods for method in ['PUT', 'DELETE'])
+            return {
+                'insecure_allow_origin': allow_origin,
+                'dangerous_methods': dangerous_methods
+            }
+        except Exception as e:
+            return {
+                'insecure_allow_origin': False,
+                'dangerous_methods': False
+            }
+
+    def check_open_redirects(self, url):
+        """Check for open redirects."""
+        try:
+            redirect_params = ['redirect=', 'next=', 'url=']
+            for param in redirect_params:
+                test_url = f"{url}?{param}http://evil.com"
+                resp = self.session.get(test_url, timeout=8, allow_redirects=False)
+                if resp.status_code == 302 and 'evil.com' in resp.headers.get('Location', ''):
+                    return True
+            return False
+        except Exception as e:
+            return False
+
+    def check_clickjacking(self, url):
+        """Check if the site can be loaded in an iframe."""
+        try:
+            resp = self.session.get(url, timeout=8)
+            x_frame_options = resp.headers.get('X-Frame-Options', '')
+            return x_frame_options != 'DENY' and x_frame_options != 'SAMEORIGIN'
+        except Exception as e:
+            return False
+
+    def check_vulnerable_libraries(self, url):
+        """Check for vulnerable libraries using Retire.js."""
+        # This is a placeholder. In a real implementation, you would use Retire.js or a similar tool.
+        return []
+
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 6: ADDITIONAL VULNERABILITY CHECKS
+    # ═══════════════════════════════════════════════════════════════
+    def check_additional_vulnerabilities(self):
+        """Check for additional vulnerabilities."""
+        self.print_section("PHASE 6: Additional Vulnerability Checks")
+
+        if not self.live_urls:
+            self.print_status("No live URLs to scan", "error")
+            return
+
+        progress = ProgressBar(len(self.live_urls), 'Checking:')
+
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = {
+                executor.submit(self._check_additional_vulnerabilities, url): url
+                for url in self.live_urls
+            }
+            for future in as_completed(futures):
+                progress.update()
+                result = future.result()
+                if result:
+                    with self.lock:
+                        self.found_count += 1
+                        severity = result['severity']
+                        self.results[severity].append(result)
+                        print()
+                        self._print_finding(result)
+
+    def _check_additional_vulnerabilities(self, url):
+        """Check for additional vulnerabilities."""
+        findings = []
+
+        # Check HTTPS enforcement and HSTS
+        https_info = self.check_https_enforcement(url)
+        if not https_info['https_enforcement']:
+            findings.append({
+                'severity': 'MEDIUM',
+                'type': 'Missing HTTPS Enforcement',
+                'url': url,
+                'details': ['HTTP does not redirect to HTTPS'],
+                'status_code': 200,
+                'content_length': 0,
+                'content_preview': ''
+            })
+        if not https_info['hsts']:
+            findings.append({
+                'severity': 'MEDIUM',
+                'type': 'Missing HSTS Header',
+                'url': url,
+                'details': ['Strict-Transport-Security header is missing'],
+                'status_code': 200,
+                'content_length': 0,
+                'content_preview': ''
+            })
+
+        # Check security headers
+        security_headers = self.check_security_headers(url)
+        if not security_headers['x_frame_options']:
+            findings.append({
+                'severity': 'MEDIUM',
+                'type': 'Missing X-Frame-Options Header',
+                'url': url,
+                'details': ['X-Frame-Options header is missing'],
+                'status_code': 200,
+                'content_length': 0,
+                'content_preview': ''
+            })
+        if not security_headers['x_content_type_options']:
+            findings.append({
+                'severity': 'MEDIUM',
+                'type': 'Missing X-Content-Type-Options Header',
+                'url': url,
+                'details': ['X-Content-Type-Options header is missing'],
+                'status_code': 200,
+                'content_length': 0,
+                'content_preview': ''
+            })
+        if not security_headers['content_security_policy']:
+            findings.append({
+                'severity': 'MEDIUM',
+                'type': 'Missing Content-Security-Policy Header',
+                'url': url,
+                'details': ['Content-Security-Policy header is missing'],
+                'status_code': 200,
+                'content_length': 0,
+                'content_preview': ''
+            })
+
+        # Check cookie security
+        cookie_security = self.check_cookie_security(url)
+        if not cookie_security['secure_cookies']:
+            findings.append({
+                'severity': 'MEDIUM',
+                'type': 'Insecure Cookies',
+                'url': url,
+                'details': ['Cookies are not marked as Secure'],
+                'status_code': 200,
+                'content_length': 0,
+                'content_preview': ''
+            })
+        if not cookie_security['http_only_cookies']:
+            findings.append({
+                'severity': 'MEDIUM',
+                'type': 'Insecure Cookies',
+                'url': url,
+                'details': ['Cookies are not marked as HttpOnly'],
+                'status_code': 200,
+                'content_length': 0,
+                'content_preview': ''
+            })
+
+        # Check CORS
+        cors_info = self.check_cors(url)
+        if cors_info['insecure_allow_origin']:
+            findings.append({
+                'severity': 'HIGH',
+                'type': 'Insecure CORS Settings',
+                'url': url,
+                'details': ['Access-Control-Allow-Origin is set to * or evil.com'],
+                'status_code': 200,
+                'content_length': 0,
+                'content_preview': ''
+            })
+        if cors_info['dangerous_methods']:
+            findings.append({
+                'severity': 'HIGH',
+                'type': 'Insecure CORS Settings',
+                'url': url,
+                'details': ['Dangerous methods (PUT, DELETE) are allowed in CORS preflight'],
+                'status_code': 200,
+                'content_length': 0,
+                'content_preview': ''
+            })
+
+        # Check open redirects
+        if self.check_open_redirects(url):
+            findings.append({
+                'severity': 'HIGH',
+                'type': 'Open Redirect',
+                'url': url,
+                'details': ['Open redirect vulnerability found'],
+                'status_code': 200,
+                'content_length': 0,
+                'content_preview': ''
+            })
+
+        # Check clickjacking
+        if self.check_clickjacking(url):
+            findings.append({
+                'severity': 'MEDIUM',
+                'type': 'Clickjacking Vulnerability',
+                'url': url,
+                'details': ['Site can be loaded in an iframe'],
+                'status_code': 200,
+                'content_length': 0,
+                'content_preview': ''
+            })
+
+        # Check vulnerable libraries
+        vulnerable_libs = self.check_vulnerable_libraries(url)
+        for lib in vulnerable_libs:
+            findings.append({
+                'severity': 'HIGH',
+                'type': 'Vulnerable Library',
+                'url': url,
+                'details': [lib],
+                'status_code': 200,
+                'content_length': 0,
+                'content_preview': ''
+            })
+
+        return findings[0] if findings else None
+
     # ═══════════════════════════════════════════════════════════════
     # GENERATE COMPREHENSIVE REPORTS
     # ═══════════════════════════════════════════════════════════════
@@ -734,7 +1064,7 @@ class GitExposerCompleteChain:
 
             f.write("  Severity Breakdown:\n")
             for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
-                icon = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", 
+                icon = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡",
                        "LOW": "🔵", "INFO": "⚪"}[sev]
                 f.write(f"    {icon} {sev}: {len(self.results[sev])}\n")
             f.write("\n")
@@ -784,7 +1114,7 @@ class GitExposerCompleteChain:
             writer.writerow(['Severity', 'Type', 'URL', 'Details'])
             for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
                 for finding in self.results[sev]:
-                    writer.writerow([sev, finding['type'], finding['url'], 
+                    writer.writerow([sev, finding['type'], finding['url'],
                                    ' | '.join(finding['details'])])
         self.print_status(f"CSV: {csv_file}", "success")
 
@@ -811,6 +1141,7 @@ class GitExposerCompleteChain:
             self.find_all_live_hosts()
             self.detect_git_exposure_comprehensive()
             self.scan_all_paths_comprehensive()
+            self.check_additional_vulnerabilities()
             self.generate_comprehensive_reports()
         except KeyboardInterrupt:
             print(f"\n{Colors.WARNING}[!] Interrupted{Colors.RESET}")
@@ -831,7 +1162,6 @@ class GitExposerCompleteChain:
         print(f"  URLs: {self.stats['urls_collected']} collected")
         print(f"  Paths: {self.stats['paths_scanned']} scanned")
         print(f"  Findings: {self.stats['findings']}\n")
-
 
 def main():
     print(f"""
@@ -860,7 +1190,6 @@ def main():
 
     scanner = GitExposerCompleteChain(domain)
     scanner.run()
-
 
 if __name__ == "__main__":
     main()
