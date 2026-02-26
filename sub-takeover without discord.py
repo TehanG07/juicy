@@ -17,12 +17,9 @@ import urllib3
 # ✅ FIX 1: Disable SSL warnings completely
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# HARDCODED WEBHOOK - No need to provide
-DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1469932856603054152/Fs4K5LPduyEzNpMi4MxVhP6qYTk2gPAXTojj73c0xTHJWFrJANgSfKH8GuZmnID6fNGh"
-
 class SubdomainTakeoverHunter:
     def __init__(self):
-        self.webhook_url = DISCORD_WEBHOOK
+        self.webhook_url = None
         self.domain = None
         self.all_subs_file = None
         self.takeover_file = None
@@ -378,75 +375,7 @@ class SubdomainTakeoverHunter:
     
     def send_discord_notification(self, vulnerables):
         """Send to Discord webhook using requests (like curl)"""
-        if not vulnerables:
-            return
-        
-        print("\n\033[94m[+] Sending Discord Alert...\033[0m")
-        
-        vuln_list = "\n".join([f"• {v}" for v in vulnerables[:15]])
-        if len(vulnerables) > 15:
-            vuln_list += f"\n... and {len(vulnerables) - 15} more"
-        
-        embed = {
-            "title": "🚨 SUBDOMAIN TAKEOVER DETECTED 🚨",
-            "description": f"Found **{len(vulnerables)}** potential subdomain takeovers",
-            "color": 15158332,
-            "fields": [
-                {
-                    "name": "🎯 Target Domain",
-                    "value": f"```{self.domain}```",
-                    "inline": True
-                },
-                {
-                    "name": "⚠️ Severity",
-                    "value": "```CRITICAL```",
-                    "inline": True
-                },
-                {
-                    "name": "📊 Total Found",
-                    "value": f"```{len(vulnerables)}```",
-                    "inline": True
-                },
-                {
-                    "name": "🔍 Vulnerable Subdomains",
-                    "value": f"```\n{vuln_list}\n```",
-                    "inline": False
-                },
-                {
-                    "name": "📝 Action Required",
-                    "value": "• Remove dangling DNS records\n• Claim unclaimed services\n• Verify subdomain ownership",
-                    "inline": False
-                }
-            ],
-            "footer": {
-                "text": f"Takeover Hunter | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            }
-        }
-        
-        webhook_data = {
-            "username": "Takeover Hunter",
-            "content": f"🚨 **TAKEOVER ALERT: `{self.domain}`** 🚨",
-            "embeds": [embed]
-        }
-        
-        try:
-            response = requests.post(
-                self.webhook_url,
-                json=webhook_data,
-                headers={'Content-Type': 'application/json'},
-                timeout=10
-            )
-            
-            if response.status_code == 204:
-                print("\033[92m[✓] Discord notification sent successfully!\033[0m")
-            elif response.status_code == 200:
-                print("\033[92m[✓] Discord notification sent successfully!\033[0m")
-            else:
-                print(f"\033[91m[!] Discord returned status: {response.status_code}\033[0m")
-                print(f"    Response: {response.text[:200]}")
-                
-        except Exception as e:
-            print(f"\033[91m[!] Error sending Discord notification: {e}\033[0m")
+        pass
     
     def save_results(self):
         if self.vulnerables:
@@ -545,7 +474,7 @@ class SubdomainTakeoverHunter:
             print("="*60)
             
             self.save_results()
-            self.send_discord_notification(self.vulnerables)
+            # self.send_discord_notification(self.vulnerables)
             
             print(f"\n\033[91m[⚠] IMMEDIATE ACTION REQUIRED!\033[0m")
             print(f"\033[93m    These subdomains can be claimed by attackers.\033[0m")
@@ -561,7 +490,6 @@ class SubdomainTakeoverHunter:
         if os.path.exists(self.all_subs_file):
             os.remove(self.all_subs_file)
 
-
 def main():
     try:
         hunter = SubdomainTakeoverHunter()
@@ -575,4 +503,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-            
