@@ -4,11 +4,11 @@
 Pure Python - No External Tools Required
 
 Default: Domain dalo → Full automatic scan
-  Step 1: Subdomain Discovery (crt.sh + DNS brute + archives)
-  Step 2: Port Scanning (68+ interesting ports)
-  Step 3: HTTP Service Probing (title + tech detect)
-  Step 4: Banner Grabbing & Fingerprinting
-  Step 5: High-Value Target Detection & TXT Report
+Step 1: Subdomain Discovery (crt.sh + DNS brute + archives)
+Step 2: Port Scanning (70+ interesting ports)
+Step 3: HTTP Service Probing (title + tech detect)
+Step 4: Banner Grabbing & Fingerprinting
+Step 5: High-Value Target Detection & TXT Report
 
 License: Educational & Authorized Testing Only
 """
@@ -33,37 +33,37 @@ from collections import defaultdict
 
 # ==================== COLORS ====================
 class C:
-    RESET     = "\033[0m"
-    BOLD      = "\033[1m"
-    DIM       = "\033[2m"
-    RED       = "\033[91m"
-    GREEN     = "\033[92m"
-    YELLOW    = "\033[93m"
-    BLUE      = "\033[94m"
-    MAGENTA   = "\033[95m"
-    CYAN      = "\033[96m"
-    WHITE     = "\033[97m"
-    ORANGE    = "\033[38;5;208m"
-    PINK      = "\033[38;5;213m"
-    LIME      = "\033[38;5;118m"
-    GOLD      = "\033[38;5;220m"
-    PURPLE    = "\033[38;5;141m"
-    TEAL      = "\033[38;5;51m"
-    GRAY      = "\033[38;5;240m"
-    LGRAY     = "\033[38;5;250m"
-    BG_RED    = "\033[41m"
+    RESET   = "\033[0m"
+    BOLD    = "\033[1m"
+    DIM     = "\033[2m"
+    RED     = "\033[91m"
+    GREEN   = "\033[92m"
+    YELLOW  = "\033[93m"
+    BLUE    = "\033[94m"
+    MAGENTA = "\033[95m"
+    CYAN    = "\033[96m"
+    WHITE   = "\033[97m"
+    ORANGE  = "\033[38;5;208m"
+    PINK    = "\033[38;5;213m"
+    LIME    = "\033[38;5;118m"
+    GOLD    = "\033[38;5;220m"
+    PURPLE  = "\033[38;5;141m"
+    TEAL    = "\033[38;5;51m"
+    GRAY    = "\033[38;5;240m"
+    LGRAY   = "\033[38;5;250m"
+    BG_RED  = "\033[41m"
 
 # ==================== DEFAULT CONFIGURATION ====================
 class Config:
-    VERSION          = "5.0"
-    MAX_THREADS      = 100       # Default threads
-    PORT_TIMEOUT     = 3         # Default port scan timeout
-    HTTP_TIMEOUT     = 10        # Default HTTP probe timeout
-    BANNER_TIMEOUT   = 5         # Banner grab timeout
-    SUB_THREADS      = 20        # Subdomain resolution threads
-    RATE_LIMIT       = 0         # No delay by default
+    VERSION      = "5.0"
+    MAX_THREADS  = 100
+    PORT_TIMEOUT = 3
+    HTTP_TIMEOUT = 10
+    BANNER_TIMEOUT = 5
+    SUB_THREADS  = 20
+    RATE_LIMIT   = 0
 
-    # DEFAULT: All 68+ interesting uncommon ports
+    # ALL interesting ports (70+ including requested ones)
     INTERESTING_PORTS = [
         81, 300, 443, 591, 593, 832, 981, 1010, 1311,
         2082, 2087, 2095, 2096, 2480,
@@ -73,12 +73,12 @@ class Config:
         6379, 6543,
         7000, 7396, 7474,
         8000, 8001, 8008, 8014, 8042, 8069, 8080, 8081,
-        8088, 8090, 8091, 8118, 8123, 8172, 8222, 8243,
+        8088, 8090, 8091, 8118, 8123, 8172, 8181, 8222, 8243,
         8280, 8281, 8333, 8443, 8500, 8834, 8880, 8888, 8983,
         9000, 9043, 9060, 9080, 9090, 9091, 9200, 9300,
         9443, 9800, 9981, 9999,
         10000, 10250, 10255, 11211,
-        12443, 15672, 16080,
+        12443, 15672, 15678, 16080,
         18091, 18092,
         20720, 27017, 28017
     ]
@@ -171,18 +171,17 @@ class Config:
         "cPanel": [b'cpanel', b'cPanel'],
     }
 
-
 # ==================== GLOBAL STATE ====================
 class State:
-    discovered_subdomains: Set[str]     = set()
-    resolved_hosts: Dict[str, str]      = {}     # subdomain -> IP
-    open_ports: Dict[str, List[int]]    = defaultdict(list)
-    http_services: List[Dict]           = []
-    high_value_targets: List[Dict]      = []
-    lock                                = threading.Lock()
-    total_ports_scanned                 = 0
-    total_open_ports                    = 0
-    start_time                          = None
+    discovered_subdomains: Set[str] = set()
+    resolved_hosts: Dict[str, str] = {}       # subdomain -> IP
+    open_ports: Dict[str, List[int]] = defaultdict(list)
+    http_services: List[Dict] = []
+    high_value_targets: List[Dict] = []
+    lock = threading.Lock()
+    total_ports_scanned = 0
+    total_open_ports = 0
+    start_time = None
 
 ST = State()
 
@@ -190,43 +189,39 @@ SSL_CTX = ssl.create_default_context()
 SSL_CTX.check_hostname = False
 SSL_CTX.verify_mode = ssl.CERT_NONE
 
-
 # ==================== BANNER ====================
 def print_banner():
     print(f"""
 {C.ORANGE}╔══════════════════════════════════════════════════════════════════════════════╗{C.RESET}
-{C.ORANGE}║{C.RESET}  {C.RED}{C.BOLD}🔥 SMART PORT SCANNER v5.0 🔥{C.RESET}                                            {C.ORANGE}║{C.RESET}
-{C.ORANGE}║{C.RESET}  {C.CYAN}Pure Python • No External Tools • Full Automatic Default{C.RESET}                 {C.ORANGE}║{C.RESET}
+{C.ORANGE}║{C.RESET} {C.RED}{C.BOLD}🔥 SMART PORT SCANNER v5.0 🔥{C.RESET}                                             {C.ORANGE}║{C.RESET}
+{C.ORANGE}║{C.RESET} {C.CYAN}Pure Python • No External Tools • Full Automatic Default{C.RESET}                   {C.ORANGE}║{C.RESET}
 {C.ORANGE}╠══════════════════════════════════════════════════════════════════════════════╣{C.RESET}
-{C.ORANGE}║{C.RESET}  {C.YELLOW}📋 Default Pipeline (just give domain):{C.RESET}                                   {C.ORANGE}║{C.RESET}
-{C.ORANGE}║{C.RESET}     {C.GREEN}Step 1:{C.RESET} Subdomain Discovery (DNS + crt.sh + archives)              {C.ORANGE}║{C.RESET}
-{C.ORANGE}║{C.RESET}     {C.GREEN}Step 2:{C.RESET} Port Scan ({C.GOLD}{len(Config.INTERESTING_PORTS)}{C.RESET} interesting ports, {C.GOLD}{Config.MAX_THREADS}{C.RESET} threads)          {C.ORANGE}║{C.RESET}
-{C.ORANGE}║{C.RESET}     {C.GREEN}Step 3:{C.RESET} HTTP Service Probing (title + tech + headers)              {C.ORANGE}║{C.RESET}
-{C.ORANGE}║{C.RESET}     {C.GREEN}Step 4:{C.RESET} High-Value Target Detection (50+ services)                 {C.ORANGE}║{C.RESET}
-{C.ORANGE}║{C.RESET}     {C.GREEN}Step 5:{C.RESET} TXT Report Generation (clean + colored)                    {C.ORANGE}║{C.RESET}
+{C.ORANGE}║{C.RESET} {C.YELLOW}📋 Default Pipeline (just give domain):{C.RESET}                                     {C.ORANGE}║{C.RESET}
+{C.ORANGE}║{C.RESET}   {C.GREEN}Step 1:{C.RESET} Subdomain Discovery (DNS + crt.sh + archives)                    {C.ORANGE}║{C.RESET}
+{C.ORANGE}║{C.RESET}   {C.GREEN}Step 2:{C.RESET} Port Scan ({C.GOLD}{len(Config.INTERESTING_PORTS)}{C.RESET} interesting ports, {C.GOLD}{Config.MAX_THREADS}{C.RESET} threads)                {C.ORANGE}║{C.RESET}
+{C.ORANGE}║{C.RESET}   {C.GREEN}Step 3:{C.RESET} HTTP Probing (title + server + content-length + IP)              {C.ORANGE}║{C.RESET}
+{C.ORANGE}║{C.RESET}   {C.GREEN}Step 4:{C.RESET} High-Value Target Detection (50+ services)                       {C.ORANGE}║{C.RESET}
+{C.ORANGE}║{C.RESET}   {C.GREEN}Step 5:{C.RESET} TXT Report Generation (clean + colored)                          {C.ORANGE}║{C.RESET}
 {C.ORANGE}╠══════════════════════════════════════════════════════════════════════════════╣{C.RESET}
-{C.ORANGE}║{C.RESET}  {C.LIME}📂 Output: TXT files only (no JSON/HTML){C.RESET}                                 {C.ORANGE}║{C.RESET}
-{C.ORANGE}║{C.RESET}  {C.RED}⚠️  For AUTHORIZED SECURITY TESTING ONLY{C.RESET}                                  {C.ORANGE}║{C.RESET}
+{C.ORANGE}║{C.RESET} {C.LIME}📂 Output: TXT files only (no JSON/HTML){C.RESET}                                   {C.ORANGE}║{C.RESET}
+{C.ORANGE}║{C.RESET} {C.RED}⚠️  For AUTHORIZED SECURITY TESTING ONLY{C.RESET}                                    {C.ORANGE}║{C.RESET}
 {C.ORANGE}╚══════════════════════════════════════════════════════════════════════════════╝{C.RESET}
 """)
-
 
 def print_step(num: int, title: str):
     print(f"\n{C.ORANGE}{'━' * 80}{C.RESET}")
     print(f"  {C.BOLD}{C.GREEN}▶ STEP {num}:{C.RESET} {C.BOLD}{C.CYAN}{title}{C.RESET}")
     print(f"{C.ORANGE}{'━' * 80}{C.RESET}")
 
-
 def print_progress(current: int, total: int, prefix: str = ""):
     bar_len = 40
-    filled  = int(bar_len * current / max(total, 1))
-    bar     = f"{C.GREEN}{'█' * filled}{C.GRAY}{'░' * (bar_len - filled)}{C.RESET}"
-    pct     = current / max(total, 1) * 100
+    filled = int(bar_len * current / max(total, 1))
+    bar = f"{C.GREEN}{'█' * filled}{C.GRAY}{'░' * (bar_len - filled)}{C.RESET}"
+    pct = current / max(total, 1) * 100
     sys.stdout.write(f"\r  {prefix} [{bar}] {C.YELLOW}{pct:5.1f}%{C.RESET} ({current}/{total})  ")
     sys.stdout.flush()
     if current >= total:
         print()
-
 
 # ==================== STEP 1: SUBDOMAIN DISCOVERY ====================
 def dns_resolve(hostname: str) -> Optional[str]:
@@ -234,7 +229,6 @@ def dns_resolve(hostname: str) -> Optional[str]:
         return socket.gethostbyname(hostname)
     except:
         return None
-
 
 def subdomain_bruteforce(domain: str) -> Set[str]:
     found = set()
@@ -255,7 +249,7 @@ def subdomain_bruteforce(domain: str) -> Set[str]:
         with lock:
             completed += 1
             if completed % 20 == 0 or completed == total:
-                print_progress(completed, total, "  Brute-force")
+                print_progress(completed, total, "Brute-force")
 
     with ThreadPoolExecutor(max_workers=Config.SUB_THREADS) as ex:
         futures = [ex.submit(check, w) for w in Config.SUBDOMAIN_WORDLIST]
@@ -263,9 +257,8 @@ def subdomain_bruteforce(domain: str) -> Set[str]:
             try: f.result()
             except: pass
 
-    print(f"  {C.GREEN}  ✅ Found {len(found)} via DNS brute-force{C.RESET}")
+    print(f"  {C.GREEN}✅ Found {len(found)} via DNS brute-force{C.RESET}")
     return found
-
 
 def crtsh_enum(domain: str) -> Set[str]:
     found = set()
@@ -280,11 +273,10 @@ def crtsh_enum(domain: str) -> Set[str]:
                     sub = sub.strip().lower()
                     if (sub.endswith(f".{domain}") or sub == domain) and "*" not in sub:
                         found.add(sub)
-        print(f"  {C.GREEN}  ✅ Found {len(found)} via crt.sh{C.RESET}")
+        print(f"  {C.GREEN}✅ Found {len(found)} via crt.sh{C.RESET}")
     except Exception as e:
-        print(f"  {C.YELLOW}  ⚠️ crt.sh error: {str(e)[:60]}{C.RESET}")
+        print(f"  {C.YELLOW}⚠️  crt.sh error: {str(e)[:60]}{C.RESET}")
     return found
-
 
 def web_archive_enum(domain: str) -> Set[str]:
     found = set()
@@ -301,11 +293,10 @@ def web_archive_enum(domain: str) -> Set[str]:
                         if host and (host.endswith(f".{domain}") or host == domain):
                             found.add(host)
                     except: pass
-        print(f"  {C.GREEN}  ✅ Found {len(found)} via Web Archive{C.RESET}")
+        print(f"  {C.GREEN}✅ Found {len(found)} via Web Archive{C.RESET}")
     except Exception as e:
-        print(f"  {C.YELLOW}  ⚠️ Web Archive error: {str(e)[:60]}{C.RESET}")
+        print(f"  {C.YELLOW}⚠️  Web Archive error: {str(e)[:60]}{C.RESET}")
     return found
-
 
 def hackertarget_enum(domain: str) -> Set[str]:
     found = set()
@@ -319,11 +310,10 @@ def hackertarget_enum(domain: str) -> Set[str]:
                     sub = line.split(',')[0].strip().lower()
                     if sub.endswith(f".{domain}") or sub == domain:
                         found.add(sub)
-        print(f"  {C.GREEN}  ✅ Found {len(found)} via HackerTarget{C.RESET}")
+        print(f"  {C.GREEN}✅ Found {len(found)} via HackerTarget{C.RESET}")
     except Exception as e:
-        print(f"  {C.YELLOW}  ⚠️ HackerTarget error: {str(e)[:60]}{C.RESET}")
+        print(f"  {C.YELLOW}⚠️  HackerTarget error: {str(e)[:60]}{C.RESET}")
     return found
-
 
 def discover_subdomains(domain: str) -> Set[str]:
     all_subs = {domain}
@@ -337,7 +327,7 @@ def discover_subdomains(domain: str) -> Set[str]:
         try:
             all_subs.update(func(domain))
         except Exception as e:
-            print(f"  {C.RED}  ❌ {name} failed: {e}{C.RESET}")
+            print(f"  {C.RED}❌ {name} failed: {e}{C.RESET}")
 
     # Resolve all
     print(f"\n  {C.CYAN}🔍 Resolving {len(all_subs)} unique subdomains...{C.RESET}")
@@ -353,9 +343,8 @@ def discover_subdomains(domain: str) -> Set[str]:
         list(ex.map(resolve_one, all_subs))
 
     live = {s for s in all_subs if s in ST.resolved_hosts}
-    print(f"  {C.GREEN}  ✅ {len(live)} live subdomains resolved{C.RESET}")
+    print(f"  {C.GREEN}✅ {len(live)} live subdomains resolved{C.RESET}")
     return live
-
 
 # ==================== STEP 2: PORT SCANNING ====================
 def scan_port(host: str, port: int, ip: str = None) -> Tuple[bool, Optional[str]]:
@@ -368,7 +357,7 @@ def scan_port(host: str, port: int, ip: str = None) -> Tuple[bool, Optional[str]
         if result == 0:
             try:
                 sock.settimeout(Config.BANNER_TIMEOUT)
-                if port in [80,443,8080,8443,8000,8888,3000,9090,8081,8088,9200,5984,15672]:
+                if port in [80,443,8080,8443,8000,8888,8181,3000,9090,8081,8088,9200,5984,15672,15678,10000]:
                     sock.sendall(b"HEAD / HTTP/1.0\r\nHost: " + host.encode() + b"\r\n\r\n")
                 else:
                     sock.sendall(b"\r\n")
@@ -379,7 +368,6 @@ def scan_port(host: str, port: int, ip: str = None) -> Tuple[bool, Optional[str]
         sock.close()
     except: pass
     return False, None
-
 
 def scan_all_ports(subdomains: Set[str], ports: List[int]):
     total_tasks = len(subdomains) * len(ports)
@@ -400,12 +388,13 @@ def scan_all_ports(subdomains: Set[str], ports: List[int]):
                     ST.open_ports[host].append(port)
                     ST.total_open_ports += 1
                     pc = C.RED if port in [3306,5432,6379,27017,9200,2375,11211] else C.GREEN
+                    ip_str = f" {C.LGRAY}[{ip}]{C.RESET}" if ip else ""
                     bn = f" {C.GRAY}│ {banner[:50]}{C.RESET}" if banner else ""
-                    print(f"\r  {C.GREEN}🟢 OPEN{C.RESET} {C.CYAN}{host}{C.RESET}:{pc}{port}{C.RESET}{bn}" + " " * 20)
+                    print(f"\r  {C.GREEN}🟢 OPEN{C.RESET} {C.CYAN}{host}{C.RESET}:{pc}{port}{C.RESET}{ip_str}{bn}" + " " * 20)
             with lock:
                 completed += 1
                 if completed % 200 == 0 or completed == total_tasks:
-                    print_progress(completed, total_tasks, "  Scanning")
+                    print_progress(completed, total_tasks, "Scanning")
 
     with ThreadPoolExecutor(max_workers=Config.MAX_THREADS) as ex:
         futures = [ex.submit(scan_host, h) for h in subdomains]
@@ -415,13 +404,14 @@ def scan_all_ports(subdomains: Set[str], ports: List[int]):
 
     print(f"\n  {C.GREEN}✅ Port scan complete: {C.GOLD}{ST.total_open_ports}{C.GREEN} open ports found{C.RESET}")
 
-
 # ==================== STEP 3: HTTP SERVICE PROBING ====================
 def probe_http(host: str, port: int) -> Optional[Dict]:
+    ip = ST.resolved_hosts.get(host, "")
     result = {
-        "host": host, "port": port, "url": "", "status_code": None,
-        "title": "", "server": "", "headers": {}, "technologies": [],
-        "is_https": False, "content_length": 0,
+        "host": host, "port": port, "ip": ip, "url": "",
+        "status_code": None, "title": "", "server": "",
+        "content_length": 0, "headers": {}, "technologies": [],
+        "is_https": False,
     }
 
     schemes = ["https","http"] if port in [443,8443,9443,12443] else ["http","https"]
@@ -440,7 +430,7 @@ def probe_http(host: str, port: int) -> Optional[Dict]:
                 body = resp.read(50000).decode('utf-8', 'ignore')
                 result["status_code"]    = resp.status
                 result["is_https"]       = scheme == "https"
-                result["content_length"] = len(body)
+                result["content_length"] = int(resp.headers.get("Content-Length", 0) or 0) or len(body)
                 result["url"]            = resp.url
 
                 for key in resp.headers:
@@ -457,18 +447,23 @@ def probe_http(host: str, port: int) -> Optional[Dict]:
         except HTTPError as e:
             result["status_code"] = e.code
             try:
+                srv = e.headers.get("Server", "") if e.headers else ""
+                result["server"] = srv
+                cl = e.headers.get("Content-Length", "0") if e.headers else "0"
                 body = e.read(50000).decode('utf-8', 'ignore')
+                result["content_length"] = int(cl or 0) or len(body)
+                for key in (e.headers or {}):
+                    result["headers"][key.lower()] = e.headers[key]
                 title_m = re.search(r'<title[^>]*>([^<]+)</title>', body, re.I)
                 if title_m:
                     result["title"] = title_m.group(1).strip()[:100]
-                result["technologies"] = detect_tech(body, {}, "")
+                result["technologies"] = detect_tech(body, result["headers"], srv)
             except: pass
             return result
         except:
             continue
 
     return None
-
 
 def detect_tech(body: str, headers: Dict, server: str) -> List[str]:
     techs = []
@@ -528,12 +523,11 @@ def detect_tech(body: str, headers: Dict, server: str) -> List[str]:
 
     return list(set(techs))
 
-
 def probe_all_http():
     tasks = [(h, p) for h, ports in ST.open_ports.items() for p in ports]
 
     if not tasks:
-        print(f"  {C.YELLOW}⚠️ No open ports to probe{C.RESET}")
+        print(f"  {C.YELLOW}⚠️  No open ports to probe{C.RESET}")
         return
 
     print(f"  {C.CYAN}🌐 Probing {C.GOLD}{len(tasks)}{C.CYAN} HTTP services...{C.RESET}\n")
@@ -548,17 +542,22 @@ def probe_all_http():
             with ST.lock:
                 ST.http_services.append(result)
                 status = result["status_code"]
-                if 200 <= status < 300:   sc = f"{C.GREEN}{status}{C.RESET}"
+                if   200 <= status < 300: sc = f"{C.GREEN}{status}{C.RESET}"
                 elif 300 <= status < 400: sc = f"{C.YELLOW}{status}{C.RESET}"
                 elif 400 <= status < 500: sc = f"{C.ORANGE}{status}{C.RESET}"
                 else:                     sc = f"{C.RED}{status}{C.RESET}"
-                tech = f" {C.MAGENTA}[{', '.join(result['technologies'][:3])}]{C.RESET}" if result['technologies'] else ""
-                ttl  = f" {C.GOLD}「{result['title'][:35]}」{C.RESET}" if result['title'] else ""
-                print(f"\r  {sc} {C.CYAN}{result['url']}{C.RESET}{ttl}{tech}" + " " * 10)
+
+                ip_s  = f" {C.LGRAY}[{result.get('ip','')}]{C.RESET}" if result.get('ip') else ""
+                ttl   = f" {C.GOLD}「{result['title'][:40]}」{C.RESET}" if result.get('title') else ""
+                srv   = f" {C.PURPLE}srv:{result['server'][:25]}{C.RESET}" if result.get('server') else ""
+                cl_s  = f" {C.TEAL}CL:{result.get('content_length',0)}{C.RESET}"
+                tech  = f" {C.MAGENTA}[{', '.join(result['technologies'][:3])}]{C.RESET}" if result.get('technologies') else ""
+
+                print(f"\r  {sc} {C.CYAN}{result['url']}{C.RESET}{ip_s}{ttl}{srv}{cl_s}{tech}" + " " * 5)
         with lock:
             completed += 1
             if completed % 5 == 0 or completed == len(tasks):
-                print_progress(completed, len(tasks), "  Probing")
+                print_progress(completed, len(tasks), "Probing")
 
     with ThreadPoolExecutor(max_workers=min(20, Config.MAX_THREADS)) as ex:
         futures = [ex.submit(probe_one, h, p) for h, p in tasks]
@@ -568,21 +567,21 @@ def probe_all_http():
 
     print(f"\n  {C.GREEN}✅ Found {C.GOLD}{len(ST.http_services)}{C.GREEN} HTTP services{C.RESET}")
 
-
 # ==================== STEP 4: HIGH-VALUE DETECTION ====================
 HIGH_VALUE_PORTS = {
     9200: "Elasticsearch", 9300: "ES-Transport", 5601: "Kibana",
     3000: "Grafana/Dev", 8500: "Consul", 15672: "RabbitMQ-Mgmt",
-    5984: "CouchDB", 27017: "MongoDB", 6379: "Redis",
-    11211: "Memcached", 2375: "Docker API", 2376: "Docker TLS",
-    10250: "Kubelet", 10255: "Kubelet-RO", 8834: "Nessus",
-    9000: "SonarQube/Portainer", 4243: "Docker", 8888: "Jupyter",
-    9090: "Prometheus", 10000: "Webmin",
+    15678: "RabbitMQ-Alt", 5984: "CouchDB", 27017: "MongoDB",
+    6379: "Redis", 11211: "Memcached", 2375: "Docker API",
+    2376: "Docker TLS", 10250: "Kubelet", 10255: "Kubelet-RO",
+    8834: "Nessus", 9000: "SonarQube/Portainer", 4243: "Docker",
+    8888: "Jupyter", 9090: "Prometheus", 10000: "Webmin",
+    3306: "MySQL", 5432: "PostgreSQL", 5900: "VNC",
 }
 
 def detect_high_value():
     for svc in ST.http_services:
-        is_hv   = False
+        is_hv = False
         reasons = []
 
         title_l = (svc.get("title") or "").lower()
@@ -618,14 +617,17 @@ def detect_high_value():
     if ST.high_value_targets:
         print(f"\n  {C.RED}{C.BOLD}🚨 HIGH-VALUE TARGETS FOUND: {len(ST.high_value_targets)}{C.RESET}")
         for t in ST.high_value_targets:
-            print(f"     {C.RED}🎯 {t['url']}{C.RESET}")
+            ip_s = f" [{t.get('ip','')}]" if t.get('ip') else ""
+            print(f"     {C.RED}🎯 {t['url']}{C.RESET}{C.LGRAY}{ip_s}{C.RESET}")
             if t.get("title"):
                 print(f"        {C.GOLD}Title: {t['title']}{C.RESET}")
+            if t.get("server"):
+                print(f"        {C.PURPLE}Server: {t['server']}{C.RESET}")
+            print(f"        {C.TEAL}Content-Length: {t.get('content_length',0)}{C.RESET}")
             for r in t.get("high_value_reasons", []):
                 print(f"        {C.YELLOW}⚠ {r}{C.RESET}")
     else:
         print(f"  {C.GREEN}✅ No high-value targets detected{C.RESET}")
-
 
 # ==================== PORT NAME LOOKUP ====================
 SERVICE_NAMES = {
@@ -644,22 +646,21 @@ SERVICE_NAMES = {
     8000:"HTTP-Alt",8001:"HTTP-Alt",8008:"HTTP-Alt",8014:"HTTP-Alt",
     8042:"YARN",8069:"Odoo",8080:"HTTP-Proxy",8081:"HTTP-Alt",
     8088:"HTTP-Alt",8090:"HTTP-Alt",8091:"Couchbase",8118:"Privoxy",
-    8123:"Polipo/HA",8172:"IIS-Mgmt",8222:"HTTP-Alt",8243:"HTTPS-Alt",
-    8280:"HTTP-Alt",8281:"HTTP-Alt",8333:"Bitcoin",
+    8123:"Polipo/HA",8172:"IIS-Mgmt",8181:"HTTP-Alt",8222:"HTTP-Alt",
+    8243:"HTTPS-Alt",8280:"HTTP-Alt",8281:"HTTP-Alt",8333:"Bitcoin",
     8443:"HTTPS-Alt",8500:"Consul",8834:"Nessus",8880:"HTTP-Alt",
     8888:"Jupyter",8983:"Solr",
     9000:"SonarQube",9043:"WebSphere",9060:"WebSphere",9080:"HTTP-Alt",
     9090:"Prometheus",9091:"HTTP-Alt",9200:"Elasticsearch",9300:"ES-Transport",
     9443:"HTTPS-Alt",9800:"WebCT",9981:"TVheadend",9999:"HTTP-Alt",
     10000:"Webmin",10250:"Kubelet",10255:"Kubelet-RO",11211:"Memcached",
-    12443:"HTTPS-Alt",15672:"RabbitMQ",16080:"HTTP-Alt",
+    12443:"HTTPS-Alt",15672:"RabbitMQ",15678:"RabbitMQ-Alt",16080:"HTTP-Alt",
     18091:"Couchbase",18092:"Couchbase",
     20720:"HTTP-Alt",27017:"MongoDB",28017:"MongoDB-HTTP",
 }
 
 def svc_name(port: int) -> str:
     return SERVICE_NAMES.get(port, f"Port-{port}")
-
 
 # ==================== STEP 5: TXT REPORT ====================
 def generate_report(domain: str):
@@ -668,8 +669,8 @@ def generate_report(domain: str):
     now_str  = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     # ═══════ CLEAN TXT ═══════
-    sep  = "=" * 100
-    thin = "-" * 100
+    sep  = "=" * 110
+    thin = "-" * 110
     L = []
 
     L.append(sep)
@@ -714,7 +715,7 @@ def generate_report(domain: str):
             hnum += 1
             if hnum > 1:
                 L.append("")
-                L.append("  " + "═" * 96)
+                L.append("  " + "═" * 106)
                 L.append("")
             ip = ST.resolved_hosts.get(host, "?")
             L.append(f"  🌐 Host: {host} ({ip})")
@@ -726,7 +727,7 @@ def generate_report(domain: str):
         L.append("     (none)")
     L.append("")
 
-    # ── HTTP Services ──
+    # ── HTTP Services (ENHANCED with Title, Server, Content-Length, IP, Status) ──
     L.append(sep)
     L.append("  🌐 HTTP SERVICES DETECTED")
     L.append(sep)
@@ -738,18 +739,20 @@ def generate_report(domain: str):
             snum += 1
             if snum > 1:
                 L.append("")
-                L.append("  " + "═" * 96)
+                L.append("  " + "═" * 106)
                 L.append("")
             L.append(f"  [{snum}] {svc['url']}")
-            L.append(f"      Status:       {svc.get('status_code','?')}")
+            L.append(f"      Status Code:    {svc.get('status_code','?')}")
+            L.append(f"      IP Address:     {svc.get('ip','?')}")
             if svc.get("title"):
-                L.append(f"      Title:        {svc['title']}")
+                L.append(f"      Title:          {svc['title']}")
             if svc.get("server"):
-                L.append(f"      Server:       {svc['server']}")
+                L.append(f"      Server:         {svc['server']}")
+            L.append(f"      Content-Length: {svc.get('content_length', 0)}")
             if svc.get("technologies"):
-                L.append(f"      Technologies: {', '.join(svc['technologies'])}")
+                L.append(f"      Technologies:   {', '.join(svc['technologies'])}")
             if svc.get("is_https"):
-                L.append(f"      HTTPS:        Yes")
+                L.append(f"      HTTPS:          Yes")
 
             for hdr in ["x-powered-by","x-aspnet-version","access-control-allow-origin","x-generator"]:
                 val = svc.get("headers",{}).get(hdr)
@@ -770,10 +773,13 @@ def generate_report(domain: str):
     if ST.high_value_targets:
         for i, t in enumerate(ST.high_value_targets, 1):
             L.append(f"  🎯 [{i}] {t['url']}")
-            if t.get("title"):  L.append(f"        Title:  {t['title']}")
-            if t.get("server"): L.append(f"        Server: {t['server']}")
+            L.append(f"        IP:             {t.get('ip','?')}")
+            L.append(f"        Status Code:    {t.get('status_code','?')}")
+            if t.get("title"):   L.append(f"        Title:          {t['title']}")
+            if t.get("server"):  L.append(f"        Server:         {t['server']}")
+            L.append(f"        Content-Length: {t.get('content_length', 0)}")
             if t.get("technologies"):
-                L.append(f"        Tech:   {', '.join(t['technologies'])}")
+                L.append(f"        Tech:           {', '.join(t['technologies'])}")
             for r in t.get("high_value_reasons", []):
                 L.append(f"        ⚠ REASON: {r}")
             L.append("")
@@ -781,22 +787,23 @@ def generate_report(domain: str):
         L.append("     (none)")
     L.append("")
 
-    # ── Quick Reference Table ──
+    # ── Quick Reference Table (ENHANCED) ──
     L.append(sep)
     L.append("  📋 QUICK REFERENCE TABLE")
     L.append(sep)
     L.append("")
-    L.append(f"  {'HOST':<45} {'PORT':<8} {'SERVICE':<20} {'STATUS':<8} {'TITLE'}")
+    L.append(f"  {'HOST':<40} {'IP':<16} {'PORT':<7} {'STATUS':<7} {'SERVER':<20} {'CL':<8} {'TITLE'}")
     L.append("  " + thin)
 
     for svc in sorted(ST.http_services, key=lambda x: (x['host'], x['port'])):
-        L.append(f"  {svc['host'][:44]:<45} {str(svc['port']):<8} {svc_name(svc['port'])[:19]:<20} {str(svc.get('status_code','?')):<8} {(svc.get('title') or '')[:40]}")
+        L.append(f"  {svc['host'][:39]:<40} {str(svc.get('ip',''))[:15]:<16} {str(svc['port']):<7} {str(svc.get('status_code','?')):<7} {str(svc.get('server',''))[:19]:<20} {str(svc.get('content_length',0)):<8} {(svc.get('title') or '')[:40]}")
 
     for host, ports in sorted(ST.open_ports.items()):
         http_ports = {s['port'] for s in ST.http_services if s['host'] == host}
         for p in sorted(ports):
             if p not in http_ports:
-                L.append(f"  {host[:44]:<45} {str(p):<8} {svc_name(p)[:19]:<20} {'N/A':<8} (non-HTTP)")
+                ip = ST.resolved_hosts.get(host, "?")
+                L.append(f"  {host[:39]:<40} {ip[:15]:<16} {str(p):<7} {'N/A':<7} {svc_name(p)[:19]:<20} {'N/A':<8} (non-HTTP)")
 
     L.append("")
     L.append(sep)
@@ -819,26 +826,27 @@ def generate_report(domain: str):
     sub_file = f"subdomains_{domain}_{ts}.txt"
     with open(sub_file, 'w') as f:
         for sub in sorted(ST.resolved_hosts):
-            f.write(f"{sub}\n")
+            f.write(f"{sub},{ST.resolved_hosts[sub]}\n")
 
     port_file = f"open_ports_{domain}_{ts}.txt"
     with open(port_file, 'w') as f:
         for host, ports in sorted(ST.open_ports.items()):
+            ip = ST.resolved_hosts.get(host, "?")
             for p in sorted(ports):
-                f.write(f"{host}:{p}\n")
+                f.write(f"{host},{ip},{p},{svc_name(p)}\n")
 
     http_file = f"http_services_{domain}_{ts}.txt"
     with open(http_file, 'w') as f:
         for svc in ST.http_services:
             tech = ', '.join(svc.get('technologies', []))
-            f.write(f"{svc['url']} [{svc.get('status_code','?')}] [{svc.get('title','')}] [{tech}]\n")
+            f.write(f"{svc['url']} | IP:{svc.get('ip','?')} | Status:{svc.get('status_code','?')} | Title:{svc.get('title','')} | Server:{svc.get('server','')} | CL:{svc.get('content_length',0)} | Tech:[{tech}]\n")
 
     hv_file = ""
     if ST.high_value_targets:
         hv_file = f"high_value_{domain}_{ts}.txt"
         with open(hv_file, 'w') as f:
             for t in ST.high_value_targets:
-                f.write(f"{t['url']} | {t.get('title','')} | {', '.join(t.get('high_value_reasons',[]))}\n")
+                f.write(f"{t['url']} | IP:{t.get('ip','?')} | Status:{t.get('status_code','?')} | Title:{t.get('title','')} | Server:{t.get('server','')} | CL:{t.get('content_length',0)} | {', '.join(t.get('high_value_reasons',[]))}\n")
 
     print(f"\n  {C.GREEN}📁 Reports saved:{C.RESET}")
     print(f"     {C.CYAN}📄 {clean_file}{C.RESET}          (Clean report)")
@@ -849,10 +857,9 @@ def generate_report(domain: str):
     if hv_file:
         print(f"     {C.RED}🚨 {hv_file}{C.RESET}       (HIGH-VALUE!)")
 
-
 def build_colored(domain, duration, now_str):
-    s = f"{C.ORANGE}{'═' * 100}{C.RESET}"
-    t = f"{C.GRAY}{'-' * 100}{C.RESET}"
+    s  = f"{C.ORANGE}{'═' * 110}{C.RESET}"
+    t  = f"{C.GRAY}{'-' * 110}{C.RESET}"
     cl = []
 
     cl.append(s)
@@ -883,15 +890,16 @@ def build_colored(domain, duration, now_str):
         ports = sorted(ST.open_ports[host])
         hnum += 1
         if hnum > 1:
-            cl.append(f"\n  {C.ORANGE}{'═' * 96}{C.RESET}\n")
-        cl.append(f"  {C.BOLD}{C.CYAN}🌐 {host} ({ST.resolved_hosts.get(host,'?')}){C.RESET}  —  {C.GOLD}{len(ports)} ports{C.RESET}")
+            cl.append(f"\n  {C.ORANGE}{'═' * 106}{C.RESET}\n")
+        ip = ST.resolved_hosts.get(host, '?')
+        cl.append(f"  {C.BOLD}{C.CYAN}🌐 {host}{C.RESET} {C.LGRAY}({ip}){C.RESET}  —  {C.GOLD}{len(ports)} ports{C.RESET}")
         cl.append(t)
         for p in ports:
-            pc = C.RED if p in [3306,5432,6379,27017,11211,9200,2375] else (C.GREEN if p in [80,443,8080,8443] else C.YELLOW)
+            pc = C.RED if p in [3306,5432,6379,27017,11211,9200,2375,5900] else (C.GREEN if p in [80,443,8080,8443] else C.YELLOW)
             cl.append(f"     {pc}🔓 :{p:<6}{C.RESET}  │  {C.LGRAY}{svc_name(p)}{C.RESET}")
     cl.append("")
 
-    # HTTP Services
+    # HTTP Services (ENHANCED)
     cl.append(s)
     cl.append(f"  {C.BOLD}{C.BLUE}🌐 HTTP SERVICES{C.RESET}")
     cl.append(s)
@@ -900,7 +908,7 @@ def build_colored(domain, duration, now_str):
     for svc in sorted(ST.http_services, key=lambda x: x['url']):
         snum += 1
         if snum > 1:
-            cl.append(f"\n  {C.ORANGE}{'═' * 96}{C.RESET}\n")
+            cl.append(f"\n  {C.ORANGE}{'═' * 106}{C.RESET}\n")
         st = svc.get("status_code", "?")
         if isinstance(st, int):
             if   200 <= st < 300: sc = f"{C.GREEN}{st}{C.RESET}"
@@ -910,16 +918,18 @@ def build_colored(domain, duration, now_str):
         else: sc = str(st)
 
         cl.append(f"  {C.BOLD}[{snum}]{C.RESET} {C.CYAN}{svc['url']}{C.RESET}")
-        cl.append(f"      {C.LGRAY}Status:{C.RESET} {sc}")
+        cl.append(f"      {C.LGRAY}Status Code:{C.RESET}    {sc}")
+        cl.append(f"      {C.LGRAY}IP Address:{C.RESET}     {C.YELLOW}{svc.get('ip','?')}{C.RESET}")
         if svc.get("title"):
-            cl.append(f"      {C.LGRAY}Title:{C.RESET}  {C.GOLD}{svc['title']}{C.RESET}")
+            cl.append(f"      {C.LGRAY}Title:{C.RESET}          {C.GOLD}{svc['title']}{C.RESET}")
         if svc.get("server"):
-            cl.append(f"      {C.LGRAY}Server:{C.RESET} {C.PURPLE}{svc['server']}{C.RESET}")
+            cl.append(f"      {C.LGRAY}Server:{C.RESET}         {C.PURPLE}{svc['server']}{C.RESET}")
+        cl.append(f"      {C.LGRAY}Content-Length:{C.RESET} {C.TEAL}{svc.get('content_length',0)}{C.RESET}")
         if svc.get("technologies"):
-            cl.append(f"      {C.LGRAY}Tech:{C.RESET}   {C.MAGENTA}{', '.join(svc['technologies'])}{C.RESET}")
+            cl.append(f"      {C.LGRAY}Tech:{C.RESET}           {C.MAGENTA}{', '.join(svc['technologies'])}{C.RESET}")
     cl.append("")
 
-    # High-Value
+    # High-Value (ENHANCED)
     cl.append(s)
     if ST.high_value_targets:
         cl.append(f"  {C.BOLD}{C.RED}{C.BG_RED} 🚨 HIGH-VALUE TARGETS 🚨 {C.RESET}")
@@ -929,20 +939,49 @@ def build_colored(domain, duration, now_str):
 
     for i, tgt in enumerate(ST.high_value_targets, 1):
         cl.append(f"\n  {C.RED}{C.BOLD}🎯 [{i}] {tgt['url']}{C.RESET}")
+        cl.append(f"        {C.LGRAY}IP:{C.RESET}     {C.YELLOW}{tgt.get('ip','?')}{C.RESET}")
+        cl.append(f"        {C.LGRAY}Status:{C.RESET} {tgt.get('status_code','?')}")
         if tgt.get("title"):
-            cl.append(f"        {C.GOLD}Title: {tgt['title']}{C.RESET}")
+            cl.append(f"        {C.GOLD}Title:  {tgt['title']}{C.RESET}")
+        if tgt.get("server"):
+            cl.append(f"        {C.PURPLE}Server: {tgt['server']}{C.RESET}")
+        cl.append(f"        {C.TEAL}CL:     {tgt.get('content_length',0)}{C.RESET}")
         if tgt.get("technologies"):
-            cl.append(f"        {C.MAGENTA}Tech:  {', '.join(tgt['technologies'])}{C.RESET}")
+            cl.append(f"        {C.MAGENTA}Tech:   {', '.join(tgt['technologies'])}{C.RESET}")
         for r in tgt.get("high_value_reasons", []):
             cl.append(f"        {C.YELLOW}⚠ {r}{C.RESET}")
     cl.append("")
 
+    # Quick Reference Table (ENHANCED)
+    cl.append(s)
+    cl.append(f"  {C.BOLD}{C.GOLD}📋 QUICK REFERENCE TABLE{C.RESET}")
+    cl.append(s)
+    cl.append(f"  {C.BOLD}{'HOST':<40} {'IP':<16} {'PORT':<7} {'STATUS':<7} {'SERVER':<20} {'CL':<8} {'TITLE'}{C.RESET}")
+    cl.append(t)
+
+    for svc in sorted(ST.http_services, key=lambda x: (x['host'], x['port'])):
+        st = svc.get('status_code', '?')
+        if isinstance(st, int):
+            if   200 <= st < 300: sc_c = C.GREEN
+            elif 300 <= st < 400: sc_c = C.YELLOW
+            elif 400 <= st < 500: sc_c = C.ORANGE
+            else:                 sc_c = C.RED
+        else: sc_c = C.WHITE
+        cl.append(f"  {C.CYAN}{svc['host'][:39]:<40}{C.RESET} {C.YELLOW}{str(svc.get('ip',''))[:15]:<16}{C.RESET} {C.LIME}{str(svc['port']):<7}{C.RESET} {sc_c}{str(st):<7}{C.RESET} {C.PURPLE}{str(svc.get('server',''))[:19]:<20}{C.RESET} {C.TEAL}{str(svc.get('content_length',0)):<8}{C.RESET} {C.GOLD}{(svc.get('title') or '')[:40]}{C.RESET}")
+
+    for host, ports in sorted(ST.open_ports.items()):
+        http_ports = {s['port'] for s in ST.http_services if s['host'] == host}
+        for p in sorted(ports):
+            if p not in http_ports:
+                ip = ST.resolved_hosts.get(host, "?")
+                cl.append(f"  {C.CYAN}{host[:39]:<40}{C.RESET} {C.YELLOW}{ip[:15]:<16}{C.RESET} {C.LIME}{str(p):<7}{C.RESET} {C.GRAY}{'N/A':<7}{C.RESET} {C.LGRAY}{svc_name(p)[:19]:<20}{C.RESET} {C.GRAY}{'N/A':<8}{C.RESET} {C.GRAY}(non-HTTP){C.RESET}")
+
+    cl.append("")
     cl.append(s)
     cl.append(f"  {C.RED}{C.BOLD}🔥 End - Smart Port Scanner v5.0{C.RESET}")
     cl.append(f"  {C.YELLOW}⚠️  Authorized testing only{C.RESET}")
     cl.append(s)
     return cl
-
 
 # ==================== MAIN ====================
 def main():
@@ -972,7 +1011,6 @@ def main():
         if not args.domain:
             print(f"  {C.RED}❌ No domain given. Exiting.{C.RESET}")
             return
-        # NO extra questions → all defaults run automatically
 
     # Apply config
     Config.MAX_THREADS  = args.threads
@@ -992,12 +1030,13 @@ def main():
 
     # Show config
     print(f"\n  {C.GREEN}✅ Default Configuration:{C.RESET}")
-    print(f"     {C.CYAN}Target:{C.RESET}      {C.BOLD}{domain}{C.RESET}")
-    print(f"     {C.CYAN}Threads:{C.RESET}     {Config.MAX_THREADS}")
+    print(f"     {C.CYAN}Target:{C.RESET}       {C.BOLD}{domain}{C.RESET}")
+    print(f"     {C.CYAN}Threads:{C.RESET}      {Config.MAX_THREADS}")
     print(f"     {C.CYAN}Port Timeout:{C.RESET} {Config.PORT_TIMEOUT}s")
     print(f"     {C.CYAN}HTTP Timeout:{C.RESET} {Config.HTTP_TIMEOUT}s")
-    print(f"     {C.CYAN}Ports:{C.RESET}       {len(ports)} interesting ports")
-    print(f"     {C.CYAN}Output:{C.RESET}      {C.BOLD}TXT Only{C.RESET}")
+    print(f"     {C.CYAN}Ports:{C.RESET}        {len(ports)} interesting ports")
+    print(f"     {C.CYAN}Output:{C.RESET}       {C.BOLD}TXT Only{C.RESET}")
+    print(f"     {C.CYAN}Shows:{C.RESET}        {C.BOLD}Title, Server, Content-Length, IP, Status Code{C.RESET}")
     print(f"\n  {C.YELLOW}🚀 All 5 steps will run automatically...{C.RESET}")
 
     ST.start_time = time.time()
@@ -1043,7 +1082,7 @@ def main():
     scan_all_ports(set(ST.resolved_hosts.keys()), ports)
 
     if not ST.open_ports:
-        print(f"\n  {C.YELLOW}⚠️ No open ports found{C.RESET}")
+        print(f"\n  {C.YELLOW}⚠️  No open ports found{C.RESET}")
         print_step(5, "REPORT GENERATION")
         generate_report(domain)
         print_final()
@@ -1064,27 +1103,27 @@ def main():
 
     print_final()
 
-
 def print_final():
     duration = time.time() - ST.start_time if ST.start_time else 0
 
     print(f"\n{C.ORANGE}{'━' * 80}{C.RESET}")
     print(f"  {C.BOLD}{C.GREEN}✅ SCAN COMPLETE!{C.RESET}")
     print(f"{C.ORANGE}{'━' * 80}{C.RESET}")
-    print(f"  {C.CYAN}⏱️  Duration:{C.RESET}     {duration:.2f}s")
-    print(f"  {C.GREEN}🌍 Subdomains:{C.RESET}   {len(ST.resolved_hosts)}")
-    print(f"  {C.LIME}🔓 Open Ports:{C.RESET}   {ST.total_open_ports}")
+    print(f"  {C.CYAN}⏱️  Duration:{C.RESET}      {duration:.2f}s")
+    print(f"  {C.GREEN}🌍 Subdomains:{C.RESET}    {len(ST.resolved_hosts)}")
+    print(f"  {C.LIME}🔓 Open Ports:{C.RESET}    {ST.total_open_ports}")
     print(f"  {C.BLUE}🌐 HTTP Services:{C.RESET} {len(ST.http_services)}")
 
     if ST.high_value_targets:
-        print(f"  {C.RED}{C.BOLD}🚨 HIGH-VALUE:{C.RESET}   {C.RED}{len(ST.high_value_targets)}{C.RESET}")
+        print(f"  {C.RED}{C.BOLD}🚨 HIGH-VALUE:{C.RESET}    {C.RED}{len(ST.high_value_targets)}{C.RESET}")
         for t in ST.high_value_targets:
-            print(f"     {C.RED}🎯 {t['url']}{C.RESET}")
+            ip_s = f" [{t.get('ip','')}]" if t.get('ip') else ""
+            srv  = f" srv:{t.get('server','')}" if t.get('server') else ""
+            print(f"     {C.RED}🎯 {t['url']}{C.RESET}{C.LGRAY}{ip_s}{srv}{C.RESET}")
     else:
-        print(f"  {C.GREEN}✅ High-Value:{C.RESET}   None")
+        print(f"  {C.GREEN}✅ High-Value:{C.RESET}    None")
 
     print(f"\n  {C.YELLOW}⚠️  Authorized testing only{C.RESET}\n")
-
 
 if __name__ == "__main__":
     main()
