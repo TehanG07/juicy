@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-🔥 ULTIMATE URL SOURCE CODE ANALYZER v9.1 🔥
+🔥 ULTIMATE URL SOURCE CODE ANALYZER v9.2 🔥
 Extracts EVERYTHING useful from URL source code
 - Improved Phone Number Extraction
 - Generates ONLY TXT Report (Colored, Category-wise)
 - Only shows URLs WITH findings
 - Separator lines between URLs
+- FIXED: Permission error on output file
+- FIXED: Proper output directory handling
 
 Author: TehanG07 + Community
 License: Educational & Authorized Testing Only
@@ -32,27 +34,22 @@ from html.parser import HTMLParser
 
 # ==================== COLORS ====================
 class Colors:
-    """ANSI color codes for terminal AND text markers for file"""
     RESET = "\033[0m"
     BOLD = "\033[1m"
     UNDERLINE = "\033[4m"
-
-    # Category colors
-    RED = "\033[91m"         # Credentials & Secrets, Private Keys
-    GREEN = "\033[92m"       # API Endpoints, Subdomains
-    YELLOW = "\033[93m"      # JWT Tokens, Interesting URLs
-    BLUE = "\033[94m"        # Emails, IP Addresses
-    MAGENTA = "\033[95m"     # Phone Numbers, Sensitive PII
-    CYAN = "\033[96m"        # AWS, Google/Firebase, Cloud
-    WHITE = "\033[97m"       # Other
-    ORANGE = "\033[38;5;208m"  # Payment Keys, Messaging
-    PINK = "\033[38;5;213m"    # Database Connections
-    LIME = "\033[38;5;118m"    # Git Tokens
-    GOLD = "\033[38;5;220m"    # Comments
-    PURPLE = "\033[38;5;141m"  # Azure
-    TEAL = "\033[38;5;51m"     # Interesting URLs
-
-    # Separator & Header
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    MAGENTA = "\033[95m"
+    CYAN = "\033[96m"
+    WHITE = "\033[97m"
+    ORANGE = "\033[38;5;208m"
+    PINK = "\033[38;5;213m"
+    LIME = "\033[38;5;118m"
+    GOLD = "\033[38;5;220m"
+    PURPLE = "\033[38;5;141m"
+    TEAL = "\033[38;5;51m"
     HEADER_BG = "\033[48;5;236m"
     SEP_COLOR = "\033[38;5;240m"
     URL_COLOR = "\033[38;5;39m"
@@ -60,7 +57,6 @@ class Colors:
     ARROW = "\033[38;5;243m"
     STAR = "\033[38;5;220m"
 
-# Category -> Color mapping
 CATEGORY_COLORS = {
     "JWT Tokens": Colors.YELLOW,
     "Emails": Colors.BLUE,
@@ -83,7 +79,6 @@ CATEGORY_COLORS = {
     "Other Secrets": Colors.WHITE,
 }
 
-# Category -> Emoji mapping
 CATEGORY_EMOJIS = {
     "JWT Tokens": "🔑",
     "Emails": "📧",
@@ -108,7 +103,7 @@ CATEGORY_EMOJIS = {
 
 # ==================== CONFIGURATION ====================
 class Config:
-    VERSION = "9.1"
+    VERSION = "9.2"
     MAX_WORKERS = 10
     FETCH_TIMEOUT = 20
     MAX_SIZE = 15 * 1024 * 1024  # 15MB
@@ -118,6 +113,7 @@ class Config:
     MAX_JS_PER_URL = 15
     DECODE_JWT = True
     VALIDATE_KEYS = True
+    OUTPUT_DIR = ""  # Will be set at runtime
 
 # ==================== GLOBALS ====================
 SEEN_URLS: Set[str] = set()
@@ -138,14 +134,99 @@ SSL_CTX = ssl.create_default_context()
 SSL_CTX.check_hostname = False
 SSL_CTX.verify_mode = ssl.CERT_NONE
 
+
+# ==================== OUTPUT DIRECTORY HANDLER ====================
+def get_safe_output_dir(preferred_dir: str = "") -> str:
+    """
+    Find a writable output directory.
+    Priority:
+    1. User-specified directory
+    2. Directory where the input file is located
+    3. Script's own directory
+    4. User's home directory
+    5. /tmp as last resort
+    """
+    candidates = []
+
+    if preferred_dir:
+        candidates.append(os.path.abspath(preferred_dir))
+
+    # Script directory
+    candidates.append(os.path.dirname(os.path.abspath(__file__)))
+
+    # Home directory
+    candidates.append(os.path.expanduser("~"))
+
+    # Temp directory
+    candidates.append("/tmp")
+
+    for directory in candidates:
+        try:
+            # Create directory if it doesn't exist
+            os.makedirs(directory, exist_ok=True)
+
+            # Test write permission by creating a temp file
+            test_file = os.path.join(directory, ".write_test_tmp")
+            with open(test_file, 'w') as f:
+                f.write("test")
+            os.remove(test_file)
+
+            print(f"   {Colors.GREEN}✅ Output directory: {directory}{Colors.RESET}")
+            return directory
+
+        except (PermissionError, OSError):
+            print(f"   {Colors.YELLOW}⚠️  No write permission: {directory}{Colors.RESET}")
+            continue
+
+    # Should never reach here
+    print(f"{Colors.RED}❌ CRITICAL: Cannot find any writable directory!{Colors.RESET}")
+    sys.exit(1)
+
+
+def safe_write_file(filepath: str, content: str) -> bool:
+    """
+    Safely write content to a file with full error handling.
+    Returns True on success, False on failure.
+    """
+    try:
+        # Ensure parent directory exists
+        parent = os.path.dirname(filepath)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        # Verify file was written
+        if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+            return True
+        else:
+            print(f"   {Colors.RED}⚠️  File written but appears empty: {filepath}{Colors.RESET}")
+            return False
+
+    except PermissionError as e:
+        print(f"   {Colors.RED}❌ Permission denied: {filepath}{Colors.RESET}")
+        print(f"   {Colors.YELLOW}💡 Try running with sudo or change output directory{Colors.RESET}")
+        return False
+
+    except OSError as e:
+        print(f"   {Colors.RED}❌ OS Error writing {filepath}: {e}{Colors.RESET}")
+        return False
+
+    except Exception as e:
+        print(f"   {Colors.RED}❌ Unexpected error writing {filepath}: {e}{Colors.RESET}")
+        return False
+
+
 # ==================== BANNER ====================
 def print_banner():
     print(f"""
 {Colors.ORANGE}╔═══════════════════════════════════════════════════════════════════════════════════╗{Colors.RESET}
-{Colors.ORANGE}║{Colors.RESET}  {Colors.RED}{Colors.BOLD}🔥 ULTIMATE URL SOURCE CODE ANALYZER v9.1 🔥{Colors.RESET}                                     {Colors.ORANGE}║{Colors.RESET}
+{Colors.ORANGE}║{Colors.RESET}  {Colors.RED}{Colors.BOLD}🔥 ULTIMATE URL SOURCE CODE ANALYZER v9.2 🔥{Colors.RESET}                                     {Colors.ORANGE}║{Colors.RESET}
 {Colors.ORANGE}║{Colors.RESET}  {Colors.CYAN}👨‍💻 Extracts EVERYTHING useful from URL source code{Colors.RESET}                               {Colors.ORANGE}║{Colors.RESET}
 {Colors.ORANGE}║{Colors.RESET}  {Colors.MAGENTA}📱 Improved Phone Number Extraction{Colors.RESET}                                              {Colors.ORANGE}║{Colors.RESET}
 {Colors.ORANGE}║{Colors.RESET}  {Colors.GREEN}📂 OUTPUT: TXT file ONLY (Colored, Category-wise){Colors.RESET}                                 {Colors.ORANGE}║{Colors.RESET}
+{Colors.ORANGE}║{Colors.RESET}  {Colors.YELLOW}🔧 FIXED: Permission errors & Output directory handling{Colors.RESET}                           {Colors.ORANGE}║{Colors.RESET}
 {Colors.ORANGE}╠═══════════════════════════════════════════════════════════════════════════════════╣{Colors.RESET}
 {Colors.ORANGE}║{Colors.RESET}  {Colors.YELLOW}📋 What it finds:{Colors.RESET}                                                                 {Colors.ORANGE}║{Colors.RESET}
 {Colors.ORANGE}║{Colors.RESET}     {Colors.YELLOW}• JWT Tokens (decoded!){Colors.RESET}    {Colors.BLUE}• Email Addresses{Colors.RESET}      {Colors.RED}• API Keys & Secrets{Colors.RESET}        {Colors.ORANGE}║{Colors.RESET}
@@ -157,6 +238,7 @@ def print_banner():
 {Colors.ORANGE}║{Colors.RESET}  {Colors.RED}⚠️  For AUTHORIZED SECURITY TESTING ONLY{Colors.RESET}                                         {Colors.ORANGE}║{Colors.RESET}
 {Colors.ORANGE}╚═══════════════════════════════════════════════════════════════════════════════════╝{Colors.RESET}
 """)
+
 
 # ==================== EXTRACTION PATTERNS ====================
 PATTERNS = {
@@ -252,12 +334,19 @@ COMPILED_PATTERNS = {}
 for name, pattern in PATTERNS.items():
     try:
         COMPILED_PATTERNS[name] = re.compile(pattern)
-    except:
+    except Exception:
         pass
 
-SUBDOMAIN_PATTERN = re.compile(r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}")
+SUBDOMAIN_PATTERN = re.compile(
+    r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}"
+)
 URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+")
-ENDPOINT_PATTERN = re.compile(r"['\"]/((?:api|v[0-9]|rest|graphql|admin|user|auth|login|register|account|dashboard|internal|debug|test|config|setting|upload|download|file|data|export|import)[^\s\"']*)['\"]", re.I)
+ENDPOINT_PATTERN = re.compile(
+    r"['\"]/((?:api|v[0-9]|rest|graphql|admin|user|auth|login|register|account|"
+    r"dashboard|internal|debug|test|config|setting|upload|download|file|data|"
+    r"export|import)[^\s\"']*)['\"]",
+    re.I
+)
 
 FALSE_POSITIVES = [
     r"example\.com", r"test\.com", r"localhost", r"127\.0\.0\.1",
@@ -268,13 +357,18 @@ FALSE_POSITIVES = [
 ]
 COMPILED_FP = [re.compile(p, re.I) for p in FALSE_POSITIVES]
 
+
 # ==================== HTTP UTILITIES ====================
 def fetch_url(url: str) -> str:
     time.sleep(Config.RATE_LIMIT)
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
             "Accept-Encoding": "identity",
             "Connection": "keep-alive",
@@ -286,6 +380,7 @@ def fetch_url(url: str) -> str:
         if Config.VERBOSE:
             print(f"    {Colors.RED}❌ Fetch error: {str(e)[:50]}{Colors.RESET}")
         return ""
+
 
 # ==================== JWT DECODER ====================
 def decode_jwt(token: str) -> Dict:
@@ -325,9 +420,11 @@ def decode_jwt(token: str) -> Dict:
         else:
             result["issues"].append("No expiration - Token never expires!")
 
-        sensitive_keys = ["email", "sub", "user", "username", "user_id", "uid",
-                          "admin", "role", "roles", "permissions", "scope", "scopes",
-                          "aud", "iss", "name", "phone", "address"]
+        sensitive_keys = [
+            "email", "sub", "user", "username", "user_id", "uid",
+            "admin", "role", "roles", "permissions", "scope", "scopes",
+            "aud", "iss", "name", "phone", "address"
+        ]
         for key in sensitive_keys:
             if key in payload:
                 result["sensitive_data"].append({key: payload[key]})
@@ -335,6 +432,7 @@ def decode_jwt(token: str) -> Dict:
     except Exception as e:
         result["issues"].append(f"Parse error: {str(e)}")
     return result
+
 
 # ==================== VALIDATION ====================
 def is_false_positive(value: str) -> bool:
@@ -346,6 +444,7 @@ def is_false_positive(value: str) -> bool:
     if len(set(value)) < 4:
         return True
     return False
+
 
 # ==================== CATEGORIZATION ====================
 def categorize_finding(pattern_name: str) -> str:
@@ -382,6 +481,7 @@ def categorize_finding(pattern_name: str) -> str:
         return "Azure Resources"
     else:
         return "Other Secrets"
+
 
 # ==================== MAIN SCANNER ====================
 def extract_from_content(content: str, source_url: str) -> Dict[str, List]:
@@ -421,7 +521,11 @@ def extract_from_content(content: str, source_url: str) -> Dict[str, List]:
         subdomain = match.group(0).lower()
         if not is_false_positive(subdomain) and subdomain not in SEEN_SECRETS:
             SEEN_SECRETS.add(subdomain)
-            if not any(cdn in subdomain for cdn in ['googleapis', 'gstatic', 'cloudflare', 'jquery', 'bootstrap', 'cdnjs', 'unpkg', 'jsdelivr']):
+            skip_cdns = [
+                'googleapis', 'gstatic', 'cloudflare', 'jquery',
+                'bootstrap', 'cdnjs', 'unpkg', 'jsdelivr'
+            ]
+            if not any(cdn in subdomain for cdn in skip_cdns):
                 findings["Subdomains"].append({"value": subdomain})
 
     for match in ENDPOINT_PATTERN.finditer(content):
@@ -433,7 +537,11 @@ def extract_from_content(content: str, source_url: str) -> Dict[str, List]:
     interesting_urls = []
     for match in URL_PATTERN.finditer(content):
         url = match.group(0)
-        if any(kw in url.lower() for kw in ['api', 'admin', 'internal', 'debug', 'test', 'dev', 'staging', 'config', 'secret', 'backup', 'token']):
+        keywords = [
+            'api', 'admin', 'internal', 'debug', 'test',
+            'dev', 'staging', 'config', 'secret', 'backup', 'token'
+        ]
+        if any(kw in url.lower() for kw in keywords):
             if url not in SEEN_SECRETS:
                 SEEN_SECRETS.add(url)
                 interesting_urls.append(url)
@@ -463,13 +571,18 @@ def scan_url(url: str) -> Dict[str, List]:
 
     if Config.FOLLOW_JS:
         js_urls = set()
-        for match in re.finditer(r'<script[^>]+src=["\']([^"\']+\.js[^"\']*)["\']', content, re.I):
+
+        for match in re.finditer(
+            r'<script[^>]+src=["\']([^"\']+\.js[^"\']*)["\']', content, re.I
+        ):
             js_url = match.group(1)
             if not js_url.startswith('http'):
                 js_url = urljoin(url, js_url)
             js_urls.add(js_url)
 
-        for match in re.finditer(r'href=["\']([^"\']+\.js[^"\']*)["\']', content, re.I):
+        for match in re.finditer(
+            r'href=["\']([^"\']+\.js[^"\']*)["\']', content, re.I
+        ):
             js_url = match.group(1)
             if not js_url.startswith('http'):
                 js_url = urljoin(url, js_url)
@@ -505,7 +618,10 @@ def scan_urls_from_file(file_path: str):
         return
 
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        urls = [line.strip() for line in f if line.strip() and line.strip().startswith('http')]
+        urls = [
+            line.strip() for line in f
+            if line.strip() and line.strip().startswith('http')
+        ]
 
     if not urls:
         print(f"{Colors.RED}❌ No valid URLs found in file{Colors.RESET}")
@@ -520,7 +636,7 @@ def scan_urls_from_file(file_path: str):
         print(f"\n{Colors.BOLD}[{i}/{len(urls)}]{Colors.RESET}", end="")
 
         if url in SEEN_URLS:
-            print(f" {Colors.YELLOW}⏭️ Already scanned: {url[:50]}...{Colors.RESET}")
+            print(f" {Colors.YELLOW}⏭️  Already scanned: {url[:50]}...{Colors.RESET}")
             continue
 
         SEEN_URLS.add(url)
@@ -545,10 +661,21 @@ def scan_urls_from_file(file_path: str):
                     color = CATEGORY_COLORS.get(category, Colors.WHITE)
                     emoji = CATEGORY_EMOJIS.get(category, "🔶")
                     print(f"       {color}{emoji} {category}: {len(items)}{Colors.RESET}")
+
                     for item in items[:3]:
-                        value = item['value'][:60] + "..." if len(item['value']) > 60 else item['value']
-                        source = f" {Colors.ARROW}[{item.get('source', '')}]{Colors.RESET}" if item.get('source') else ""
-                        print(f"         {Colors.ARROW}→{Colors.RESET} {color}{value}{Colors.RESET}{source}")
+                        value = (
+                            item['value'][:60] + "..."
+                            if len(item['value']) > 60
+                            else item['value']
+                        )
+                        source = (
+                            f" {Colors.ARROW}[{item.get('source', '')}]{Colors.RESET}"
+                            if item.get('source') else ""
+                        )
+                        print(
+                            f"         {Colors.ARROW}→{Colors.RESET} "
+                            f"{color}{value}{Colors.RESET}{source}"
+                        )
 
                         if 'decoded' in item:
                             jwt = item['decoded']
@@ -558,7 +685,9 @@ def scan_urls_from_file(file_path: str):
                                 print(f"           {Colors.GREEN}🔑 {data}{Colors.RESET}")
 
                     if len(items) > 3:
-                        print(f"         {Colors.ARROW}... and {len(items) - 3} more{Colors.RESET}")
+                        print(
+                            f"         {Colors.ARROW}... and {len(items) - 3} more{Colors.RESET}"
+                        )
         else:
             print(f"    {Colors.SEP_COLOR}➖ No findings{Colors.RESET}")
 
@@ -571,12 +700,15 @@ def strip_ansi(text: str) -> str:
 
 
 def generate_txt_report():
-    """Generate TXT report - ONLY URLs with findings, category-wise, separated"""
+    """Generate TXT report with proper permission & error handling"""
 
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    duration = (datetime.datetime.now() - STATS['start_time']).total_seconds() if STATS['start_time'] else 0
+    duration = (
+        (datetime.datetime.now() - STATS['start_time']).total_seconds()
+        if STATS['start_time'] else 0
+    )
 
-    # Console Summary
+    # ── Console summary ──────────────────────────────────────────────────────
     print(f"\n\n{Colors.SEP_COLOR}{'=' * 80}{Colors.RESET}")
     print(f"{Colors.BOLD}{Colors.STAR}📊 SCAN COMPLETE - SUMMARY{Colors.RESET}")
     print(f"{Colors.SEP_COLOR}{'=' * 80}{Colors.RESET}")
@@ -587,20 +719,27 @@ def generate_txt_report():
     print(f"   {Colors.MAGENTA}Scan Duration:{Colors.RESET}        {Colors.COUNT_COLOR}{duration:.2f} seconds{Colors.RESET}")
     print(f"{Colors.SEP_COLOR}{'=' * 80}{Colors.RESET}")
 
+    # ── Determine safe output directory ──────────────────────────────────────
+    out_dir = get_safe_output_dir(Config.OUTPUT_DIR)
+    txt_file         = os.path.join(out_dir, f"results_{timestamp}.txt")
+    colored_txt_file = os.path.join(out_dir, f"results_{timestamp}_colored.txt")
+
+    # ── No findings edge case ─────────────────────────────────────────────────
     if not URL_FINDINGS:
         print(f"\n{Colors.RED}❌ No findings in any URL{Colors.RESET}")
-        txt_file = f"results_{timestamp}.txt"
-        with open(txt_file, 'w', encoding='utf-8') as f:
-            f.write("=" * 100 + "\n")
-            f.write("  ULTIMATE URL SOURCE CODE ANALYZER v9.1 - RESULTS\n")
-            f.write(f"  Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"  Duration: {duration:.2f} seconds\n")
-            f.write("=" * 100 + "\n\n")
-            f.write("  No findings in any URL.\n")
-        print(f"\n{Colors.CYAN}📁 Results TXT: {txt_file}{Colors.RESET}")
+        content = (
+            "=" * 100 + "\n"
+            "  ULTIMATE URL SOURCE CODE ANALYZER v9.2 - RESULTS\n"
+            f"  Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"  Duration: {duration:.2f} seconds\n"
+            + "=" * 100 + "\n\n"
+            "  No findings in any URL.\n"
+        )
+        if safe_write_file(txt_file, content):
+            print(f"\n{Colors.CYAN}📁 Results TXT: {txt_file}{Colors.RESET}")
         return
 
-    # Categorize all findings
+    # ── Category totals ───────────────────────────────────────────────────────
     category_totals = defaultdict(int)
     for url, findings in URL_FINDINGS.items():
         for category, items in findings.items():
@@ -613,31 +752,24 @@ def generate_txt_report():
         emoji = CATEGORY_EMOJIS.get(category, "🔶")
         print(f"   {color}{emoji} {category}: {count}{Colors.RESET}")
 
-    # ===== BUILD TXT CONTENT (with ANSI colors for terminal-like viewing) =====
-    # We'll write two versions: colored (for terminals that support it) and clean
-
-    txt_file = f"results_{timestamp}.txt"
-
-    lines = []  # Clean lines (no ANSI)
-    c_lines = []  # Colored lines (with ANSI for cat/less -R)
-
+    # ── Build clean TXT lines ─────────────────────────────────────────────────
     sep_line = "=" * 100
-    thin_sep = "-" * 100
+    thin_sep  = "-" * 100
 
-    # Header
+    lines = []
     lines.append(sep_line)
-    lines.append("  🔥 ULTIMATE URL SOURCE CODE ANALYZER v9.1 - RESULTS REPORT")
+    lines.append("  🔥 ULTIMATE URL SOURCE CODE ANALYZER v9.2 - RESULTS REPORT")
     lines.append(f"  📅 Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"  ⏱️  Duration: {duration:.2f} seconds")
     lines.append(sep_line)
     lines.append("")
-    lines.append(f"  📊 SCAN STATISTICS:")
+    lines.append("  📊 SCAN STATISTICS:")
     lines.append(f"     • URLs Scanned:         {STATS['urls_scanned']}")
     lines.append(f"     • URLs with Findings:   {STATS['urls_with_findings']}")
     lines.append(f"     • JS Files Scanned:     {STATS['js_files_scanned']}")
     lines.append(f"     • Total Findings:       {STATS['total_findings']}")
     lines.append("")
-    lines.append(f"  📈 CATEGORY TOTALS:")
+    lines.append("  📈 CATEGORY TOTALS:")
     lines.append(thin_sep)
 
     for category, count in sorted(category_totals.items(), key=lambda x: -x[1]):
@@ -650,27 +782,13 @@ def generate_txt_report():
     lines.append(sep_line)
     lines.append("")
 
-    # Category sort order (most critical first)
     CATEGORY_ORDER = [
-        "Credentials & Secrets",
-        "Private Keys",
-        "JWT Tokens",
-        "AWS Resources",
-        "Google/Firebase",
-        "Azure Resources",
-        "Database Connections",
-        "Payment Keys",
-        "Git Tokens",
-        "Messaging/Webhooks",
-        "Sensitive PII",
-        "Phone Numbers",
-        "Emails",
-        "IP Addresses",
-        "API Endpoints",
-        "Subdomains",
-        "Interesting URLs",
-        "Interesting Comments",
-        "Other Secrets",
+        "Credentials & Secrets", "Private Keys", "JWT Tokens",
+        "AWS Resources", "Google/Firebase", "Azure Resources",
+        "Database Connections", "Payment Keys", "Git Tokens",
+        "Messaging/Webhooks", "Sensitive PII", "Phone Numbers",
+        "Emails", "IP Addresses", "API Endpoints", "Subdomains",
+        "Interesting URLs", "Interesting Comments", "Other Secrets",
     ]
 
     url_num = 0
@@ -678,7 +796,6 @@ def generate_txt_report():
         url_num += 1
         total = sum(len(v) for v in findings.values())
 
-        # Separator between URLs
         if url_num > 1:
             lines.append("")
             lines.append("═" * 100)
@@ -688,7 +805,6 @@ def generate_txt_report():
         lines.append(f"     📊 Total Findings: {total}")
         lines.append(thin_sep)
 
-        # Sort categories by priority order
         sorted_cats = sorted(
             findings.items(),
             key=lambda x: CATEGORY_ORDER.index(x[0]) if x[0] in CATEGORY_ORDER else 999
@@ -699,25 +815,20 @@ def generate_txt_report():
                 continue
 
             emoji = CATEGORY_EMOJIS.get(category, "🔶")
-
             lines.append("")
             lines.append(f"     ┌─── {emoji} {category} ({len(items)}) ───")
-            lines.append(f"     │")
+            lines.append("     │")
 
             for idx, item in enumerate(items, 1):
                 value = item['value']
                 if len(value) > 120:
                     value = value[:120] + "..."
 
-                source_str = ""
-                if item.get('source'):
-                    source_str = f"  ← [{item['source']}]"
-
+                source_str  = f"  ← [{item['source']}]" if item.get('source') else ""
                 pattern_str = f"  ({item.get('pattern', '')})" if item.get('pattern') else ""
 
                 lines.append(f"     │  [{idx:>3}] {value}{source_str}{pattern_str}")
 
-                # JWT decoded details
                 if 'decoded' in item:
                     jwt = item['decoded']
                     for issue in jwt.get('issues', []):
@@ -726,57 +837,71 @@ def generate_txt_report():
                         key = list(data.keys())[0]
                         lines.append(f"     │        🔑 {key}: {data[key]}")
                     if jwt.get('header'):
-                        lines.append(f"     │        📋 Header: alg={jwt['header'].get('alg', '?')}, typ={jwt['header'].get('typ', '?')}")
+                        lines.append(
+                            f"     │        📋 Header: "
+                            f"alg={jwt['header'].get('alg', '?')}, "
+                            f"typ={jwt['header'].get('typ', '?')}"
+                        )
 
-            lines.append(f"     │")
-            lines.append(f"     └{'─' * 60}")
+            lines.append("     │")
+            lines.append("     └" + "─" * 60)
 
-    # Footer
     lines.append("")
     lines.append(sep_line)
-    lines.append("  🔥 End of Report - Ultimate URL Source Code Analyzer v9.1")
+    lines.append("  🔥 End of Report - Ultimate URL Source Code Analyzer v9.2")
     lines.append("  ⚠️  For authorized security testing only")
     lines.append(sep_line)
 
-    # Write clean TXT
-    with open(txt_file, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines))
+    # ── Write clean TXT ───────────────────────────────────────────────────────
+    clean_content = '\n'.join(lines)
+    if safe_write_file(txt_file, clean_content):
+        size_kb = os.path.getsize(txt_file) / 1024
+        print(f"\n{Colors.GREEN}📁 Results TXT : {Colors.BOLD}{txt_file}{Colors.RESET}")
+        print(f"   {Colors.CYAN}Size: {size_kb:.1f} KB  |  "
+              f"Findings: {STATS['total_findings']}  |  "
+              f"URLs: {STATS['urls_with_findings']}{Colors.RESET}")
+    else:
+        # Last-resort: print to stdout so nothing is lost
+        print(f"\n{Colors.RED}⚠️  Could not write TXT file. "
+              f"Printing report to stdout instead:{Colors.RESET}\n")
+        print(clean_content)
 
-    print(f"\n{Colors.GREEN}📁 Results TXT: {Colors.BOLD}{txt_file}{Colors.RESET}")
-    print(f"{Colors.CYAN}   → Contains {STATS['total_findings']} findings from {STATS['urls_with_findings']} URLs{Colors.RESET}")
+    # ── Build & write colored TXT ─────────────────────────────────────────────
+    colored_lines = build_colored_txt(URL_FINDINGS, category_totals, duration)
+    colored_content = '\n'.join(colored_lines)
 
-    # Also write a colored version for terminals
-    colored_txt_file = f"results_{timestamp}_colored.txt"
-    colored_lines = build_colored_txt(lines, URL_FINDINGS, category_totals)
-    with open(colored_txt_file, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(colored_lines))
-
-    print(f"{Colors.GREEN}📁 Colored TXT: {Colors.BOLD}{colored_txt_file}{Colors.RESET}")
-    print(f"   {Colors.ARROW}→ View with: cat {colored_txt_file}  (or)  less -R {colored_txt_file}{Colors.RESET}")
+    if safe_write_file(colored_txt_file, colored_content):
+        print(f"{Colors.GREEN}📁 Colored TXT : {Colors.BOLD}{colored_txt_file}{Colors.RESET}")
+        print(f"   {Colors.ARROW}→ View with: cat {colored_txt_file}")
+        print(f"   {Colors.ARROW}→ Or:        less -R {colored_txt_file}{Colors.RESET}")
 
 
-def build_colored_txt(clean_lines, url_findings, category_totals):
-    """Build a colored version of the report using ANSI codes"""
+# ── Colored report builder ─────────────────────────────────────────────────────
+def build_colored_txt(
+    url_findings: Dict,
+    category_totals: Dict,
+    duration: float
+) -> List[str]:
+    """Build ANSI-colored version of the report"""
 
     c = []
-    sep_line = f"{Colors.ORANGE}{'═' * 100}{Colors.RESET}"
-    thin_sep = f"{Colors.SEP_COLOR}{'-' * 100}{Colors.RESET}"
+    sep  = f"{Colors.ORANGE}{'═' * 100}{Colors.RESET}"
+    thin = f"{Colors.SEP_COLOR}{'-' * 100}{Colors.RESET}"
 
-    c.append(sep_line)
-    c.append(f"  {Colors.RED}{Colors.BOLD}🔥 ULTIMATE URL SOURCE CODE ANALYZER v9.1 - RESULTS REPORT{Colors.RESET}")
+    c.append(sep)
+    c.append(f"  {Colors.RED}{Colors.BOLD}🔥 ULTIMATE URL SOURCE CODE ANALYZER v9.2 - RESULTS{Colors.RESET}")
     c.append(f"  {Colors.CYAN}📅 Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{Colors.RESET}")
-    duration = (datetime.datetime.now() - STATS['start_time']).total_seconds() if STATS['start_time'] else 0
-    c.append(f"  {Colors.CYAN}⏱️  Duration: {duration:.2f} seconds{Colors.RESET}")
-    c.append(sep_line)
+    c.append(f"  {Colors.CYAN}⏱️  Duration : {duration:.2f} seconds{Colors.RESET}")
+    c.append(sep)
     c.append("")
     c.append(f"  {Colors.BOLD}{Colors.YELLOW}📊 SCAN STATISTICS:{Colors.RESET}")
-    c.append(f"     {Colors.CYAN}• URLs Scanned:{Colors.RESET}         {Colors.COUNT_COLOR}{STATS['urls_scanned']}{Colors.RESET}")
-    c.append(f"     {Colors.GREEN}• URLs with Findings:{Colors.RESET}   {Colors.COUNT_COLOR}{STATS['urls_with_findings']}{Colors.RESET}")
-    c.append(f"     {Colors.YELLOW}• JS Files Scanned:{Colors.RESET}     {Colors.COUNT_COLOR}{STATS['js_files_scanned']}{Colors.RESET}")
-    c.append(f"     {Colors.RED}• Total Findings:{Colors.RESET}       {Colors.COUNT_COLOR}{STATS['total_findings']}{Colors.RESET}")
+    c.append(f"     {Colors.CYAN}• URLs Scanned        :{Colors.RESET} {Colors.COUNT_COLOR}{STATS['urls_scanned']}{Colors.RESET}")
+    c.append(f"     {Colors.GREEN}• URLs with Findings  :{Colors.RESET} {Colors.COUNT_COLOR}{STATS['urls_with_findings']}{Colors.RESET}")
+    c.append(f"     {Colors.YELLOW}• JS Files Scanned    :{Colors.RESET} {Colors.COUNT_COLOR}{STATS['js_files_scanned']}{Colors.RESET}")
+    c.append(f"     {Colors.RED}• Total Findings      :{Colors.RESET} {Colors.COUNT_COLOR}{STATS['total_findings']}{Colors.RESET}")
     c.append("")
     c.append(f"  {Colors.BOLD}{Colors.MAGENTA}📈 CATEGORY TOTALS:{Colors.RESET}")
-    c.append(thin_sep)
+    c.append(thin)
 
     for category, count in sorted(category_totals.items(), key=lambda x: -x[1]):
         color = CATEGORY_COLORS.get(category, Colors.WHITE)
@@ -784,9 +909,9 @@ def build_colored_txt(clean_lines, url_findings, category_totals):
         c.append(f"     {color}{emoji} {category}: {Colors.COUNT_COLOR}{count}{Colors.RESET}")
 
     c.append("")
-    c.append(sep_line)
+    c.append(sep)
     c.append(f"  {Colors.BOLD}{Colors.CYAN}🔗 DETAILED FINDINGS BY URL{Colors.RESET}")
-    c.append(sep_line)
+    c.append(sep)
     c.append("")
 
     CATEGORY_ORDER = [
@@ -808,9 +933,11 @@ def build_colored_txt(clean_lines, url_findings, category_totals):
             c.append(f"{Colors.ORANGE}{'═' * 100}{Colors.RESET}")
             c.append("")
 
-        c.append(f"  {Colors.BOLD}{Colors.URL_COLOR}🌐 URL #{url_num}: {url}{Colors.RESET}")
+        c.append(
+            f"  {Colors.BOLD}{Colors.URL_COLOR}🌐 URL #{url_num}: {url}{Colors.RESET}"
+        )
         c.append(f"     {Colors.COUNT_COLOR}📊 Total Findings: {total}{Colors.RESET}")
-        c.append(thin_sep)
+        c.append(thin)
 
         sorted_cats = sorted(
             findings.items(),
@@ -835,32 +962,52 @@ def build_colored_txt(clean_lines, url_findings, category_totals):
 
                 source_str = ""
                 if item.get('source'):
-                    source_str = f"  {Colors.ARROW}← [{item['source']}]{Colors.RESET}"
+                    source_str = (
+                        f"  {Colors.ARROW}← [{item['source']}]{Colors.RESET}"
+                    )
 
                 pattern_str = ""
                 if item.get('pattern'):
-                    pattern_str = f"  {Colors.SEP_COLOR}({item['pattern']}){Colors.RESET}"
+                    pattern_str = (
+                        f"  {Colors.SEP_COLOR}({item['pattern']}){Colors.RESET}"
+                    )
 
-                c.append(f"     {color}│{Colors.RESET}  {Colors.BOLD}[{idx:>3}]{Colors.RESET} {color}{value}{Colors.RESET}{source_str}{pattern_str}")
+                c.append(
+                    f"     {color}│{Colors.RESET}  "
+                    f"{Colors.BOLD}[{idx:>3}]{Colors.RESET} "
+                    f"{color}{value}{Colors.RESET}"
+                    f"{source_str}{pattern_str}"
+                )
 
                 if 'decoded' in item:
                     jwt = item['decoded']
                     for issue in jwt.get('issues', []):
-                        c.append(f"     {color}│{Colors.RESET}        {Colors.YELLOW}⚠ {issue}{Colors.RESET}")
+                        c.append(
+                            f"     {color}│{Colors.RESET}        "
+                            f"{Colors.YELLOW}⚠ {issue}{Colors.RESET}"
+                        )
                     for data in jwt.get('sensitive_data', []):
                         key = list(data.keys())[0]
-                        c.append(f"     {color}│{Colors.RESET}        {Colors.GREEN}🔑 {key}: {data[key]}{Colors.RESET}")
+                        c.append(
+                            f"     {color}│{Colors.RESET}        "
+                            f"{Colors.GREEN}🔑 {key}: {data[key]}{Colors.RESET}"
+                        )
                     if jwt.get('header'):
-                        c.append(f"     {color}│{Colors.RESET}        {Colors.CYAN}📋 Header: alg={jwt['header'].get('alg', '?')}, typ={jwt['header'].get('typ', '?')}{Colors.RESET}")
+                        c.append(
+                            f"     {color}│{Colors.RESET}        "
+                            f"{Colors.CYAN}📋 Header: "
+                            f"alg={jwt['header'].get('alg', '?')}, "
+                            f"typ={jwt['header'].get('typ', '?')}{Colors.RESET}"
+                        )
 
             c.append(f"     {color}│{Colors.RESET}")
             c.append(f"     {color}└{'─' * 60}{Colors.RESET}")
 
     c.append("")
-    c.append(sep_line)
-    c.append(f"  {Colors.BOLD}{Colors.RED}🔥 End of Report - Ultimate URL Source Code Analyzer v9.1{Colors.RESET}")
+    c.append(sep)
+    c.append(f"  {Colors.BOLD}{Colors.RED}🔥 End of Report - Ultimate URL Source Code Analyzer v9.2{Colors.RESET}")
     c.append(f"  {Colors.YELLOW}⚠️  For authorized security testing only{Colors.RESET}")
-    c.append(sep_line)
+    c.append(sep)
 
     return c
 
@@ -873,7 +1020,9 @@ def main():
     print(f"   {Colors.SEP_COLOR}(One URL per line){Colors.RESET}")
     print()
 
-    file_path = input(f"{Colors.GREEN}👉 File path: {Colors.RESET}").strip().strip('"').strip("'")
+    file_path = input(
+        f"{Colors.GREEN}👉 File path: {Colors.RESET}"
+    ).strip().strip('"').strip("'")
 
     if not file_path:
         print(f"{Colors.RED}❌ No file path provided{Colors.RESET}")
@@ -883,26 +1032,45 @@ def main():
         print(f"{Colors.RED}❌ File not found: {file_path}{Colors.RESET}")
         return
 
-    # Options
-    print(f"\n{Colors.YELLOW}⚙️ Configuration options:{Colors.RESET}")
+    # ── Output directory ──────────────────────────────────────────────────────
+    print(f"\n{Colors.YELLOW}📁 Output directory options:{Colors.RESET}")
+    print(f"   {Colors.SEP_COLOR}(Press Enter to use the same folder as your input file){Colors.RESET}")
 
-    js_option = input(f"{Colors.CYAN}📜 Also scan linked JS files? [Y/n]: {Colors.RESET}").strip().lower()
+    out_dir_input = input(
+        f"{Colors.GREEN}👉 Output directory [Enter = auto]: {Colors.RESET}"
+    ).strip().strip('"').strip("'")
+
+    if out_dir_input:
+        # User specified a directory
+        Config.OUTPUT_DIR = out_dir_input
+    else:
+        # Default: same directory as the input file
+        input_file_dir = os.path.dirname(os.path.abspath(file_path))
+        Config.OUTPUT_DIR = input_file_dir
+
+    print(f"\n{Colors.CYAN}🔍 Checking output directory permissions...{Colors.RESET}")
+    # Validate immediately so user knows early if there's an issue
+    Config.OUTPUT_DIR = get_safe_output_dir(Config.OUTPUT_DIR)
+
+    # ── Options ───────────────────────────────────────────────────────────────
+    print(f"\n{Colors.YELLOW}⚙️  Configuration options:{Colors.RESET}")
+    js_option = input(
+        f"{Colors.CYAN}📜 Also scan linked JS files? [Y/n]: {Colors.RESET}"
+    ).strip().lower()
     Config.FOLLOW_JS = js_option != 'n'
 
     print(f"\n{Colors.GREEN}✅ Configuration:{Colors.RESET}")
-    print(f"   {Colors.CYAN}• File:{Colors.RESET} {file_path}")
-    print(f"   {Colors.CYAN}• Scan JS files:{Colors.RESET} {'Yes' if Config.FOLLOW_JS else 'No'}")
-    print(f"   {Colors.CYAN}• Decode JWT tokens:{Colors.RESET} Yes")
-    print(f"   {Colors.CYAN}• Output:{Colors.RESET} {Colors.BOLD}TXT ONLY{Colors.RESET} (results.txt)")
+    print(f"   {Colors.CYAN}• Input File    :{Colors.RESET} {file_path}")
+    print(f"   {Colors.CYAN}• Output Dir    :{Colors.RESET} {Config.OUTPUT_DIR}")
+    print(f"   {Colors.CYAN}• Scan JS files :{Colors.RESET} {'Yes' if Config.FOLLOW_JS else 'No'}")
+    print(f"   {Colors.CYAN}• Decode JWT    :{Colors.RESET} Yes")
+    print(f"   {Colors.CYAN}• Output format :{Colors.RESET} {Colors.BOLD}TXT ONLY{Colors.RESET}")
 
     print(f"\n{Colors.SEP_COLOR}{'=' * 80}{Colors.RESET}")
     print(f"{Colors.BOLD}{Colors.GREEN}🚀 Starting scan...{Colors.RESET}")
     print(f"{Colors.SEP_COLOR}{'=' * 80}{Colors.RESET}")
 
-    # Scan
     scan_urls_from_file(file_path)
-
-    # Generate TXT report only
     generate_txt_report()
 
     print(f"\n{Colors.SEP_COLOR}{'=' * 80}{Colors.RESET}")
@@ -910,8 +1078,12 @@ def main():
     print(f"{Colors.SEP_COLOR}{'=' * 80}{Colors.RESET}")
 
     if URL_FINDINGS:
-        print(f"\n{Colors.STAR}🎯 Found data in {Colors.COUNT_COLOR}{len(URL_FINDINGS)}{Colors.RESET}{Colors.STAR} URLs!{Colors.RESET}")
-        print(f"   {Colors.CYAN}Check the generated TXT files in current directory.{Colors.RESET}")
+        print(
+            f"\n{Colors.STAR}🎯 Found data in "
+            f"{Colors.COUNT_COLOR}{len(URL_FINDINGS)}{Colors.RESET}"
+            f"{Colors.STAR} URLs!{Colors.RESET}"
+        )
+        print(f"   {Colors.CYAN}Output saved to: {Colors.BOLD}{Config.OUTPUT_DIR}{Colors.RESET}")
         print(f"   {Colors.GREEN}• results_***.txt{Colors.RESET}         → Clean text report")
         print(f"   {Colors.GREEN}• results_***_colored.txt{Colors.RESET} → Colored (view with: cat filename.txt)")
     else:
