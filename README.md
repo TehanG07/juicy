@@ -6,3 +6,12 @@ pip3 install pywhatkit regex
 
 
 pip3 install detect-secrets trufflehog pywhat
+
+# Activate your existing myenv virtual environment
+source ~/myenv/bin/activate
+
+# Install the required modules inside the active environment
+pip install selenium webdriver-manager tqdm
+
+sudo apt update
+sudo apt install google-chrome-stable -y
