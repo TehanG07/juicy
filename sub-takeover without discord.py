@@ -1,505 +1,350 @@
 #!/usr/bin/env python3
-"""
-Subdomain Takeover Hunter - Auto Discord Notification
-Just run: python3 sub-takeover.py
-"""
 
-import sys
 import subprocess
-import json
-import requests
+import sys
 import os
+import json
+import re
+import urllib.request
+import urllib.error
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
-import urllib3
 
-# ✅ FIX 1: Disable SSL warnings completely
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# ─────────────────────────────────────────────
+#  ANSI Colors
+# ─────────────────────────────────────────────
+RED     = "\033[91m"
+GREEN   = "\033[92m"
+YELLOW  = "\033[93m"
+CYAN    = "\033[96m"
+MAGENTA = "\033[95m"
+BOLD    = "\033[1m"
+DIM     = "\033[2m"
+RESET   = "\033[0m"
 
-class SubdomainTakeoverHunter:
-    def __init__(self):
-        self.webhook_url = None
-        self.domain = None
-        self.all_subs_file = None
-        self.takeover_file = None
-        self.vulnerables = []
-        
-    def print_banner(self):
-        banner = """
-\033[91m╔═══════════════════════════════════════════════════════╗
-║                                                       ║
-║        🎯 SUBDOMAIN TAKEOVER HUNTER 🎯               ║
-║         Automated Takeover Detection                  ║
-║          With Discord Notifications                   ║
-║                                                       ║
-╚═══════════════════════════════════════════════════════╝\033[0m
-        """
-        print(banner)
-    
-    def get_domain_input(self):
-        print("\033[96m[?] Enter target domain:\033[0m ", end="")
-        self.domain = input().strip()
-        
-        if not self.domain:
-            print("\033[91m[!] Domain cannot be empty!\033[0m")
-            sys.exit(1)
-        
-        self.domain = self.domain.replace("http://", "").replace("https://", "").rstrip("/")
-        
-        self.all_subs_file = f"{self.domain}_all_subs.txt"
-        self.takeover_file = f"{self.domain}_takeovers.txt"
-        
-        print(f"\n\033[92m[✓] Target Set: {self.domain}\033[0m")
-        print(f"\033[93m[*] Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\033[0m\n")
-    
-    def run_command(self, command):
-        try:
-            result = subprocess.run(
-                command, 
-                shell=True, 
-                capture_output=True, 
-                text=True,
-                timeout=300
-            )
-            return result.stdout.strip() if result.stdout else ""
-        except subprocess.TimeoutExpired:
-            print(f"\033[91m[!] Command timed out: {command}\033[0m")
-            return ""
-        except Exception as e:
-            print(f"\033[91m[!] Error: {e}\033[0m")
-            return ""
-    
-    def tool_exists(self, tool):
-        return subprocess.run(f"which {tool}", shell=True, capture_output=True).returncode == 0
-    
-    def find_subdomains(self):
-        print("\033[94m[+] Hunting Subdomains...\033[0m")
-        subdomains = set()
-        
-        # subfinder
-        print("    \033[96m→ Running subfinder...\033[0m")
-        result = self.run_command(f"subfinder -d {self.domain} -silent")
-        if result:
-            subs = [s.strip() for s in result.split('\n') if s.strip()]
-            subdomains.update(subs)
-            print(f"      \033[92m✓ Found {len(subs)} subdomains\033[0m")
-        
-        # assetfinder
-        if self.tool_exists("assetfinder"):
-            print("    \033[96m→ Running assetfinder...\033[0m")
-            result = self.run_command(f"assetfinder --subs-only {self.domain}")
-            if result:
-                subs = [s.strip() for s in result.split('\n') if s.strip()]
-                subdomains.update(subs)
-                print(f"      \033[92m✓ Found {len(subs)} subdomains\033[0m")
-        
-        # amass
-        if self.tool_exists("amass"):
-            print("    \033[96m→ Running amass...\033[0m")
-            result = self.run_command(f"amass enum -passive -d {self.domain} -silent 2>/dev/null")
-            if result:
-                subs = [s.strip() for s in result.split('\n') if s.strip()]
-                subdomains.update(subs)
-                print(f"      \033[92m✓ Found {len(subs)} subdomains\033[0m")
-        
-        # findomain
-        if self.tool_exists("findomain"):
-            print("    \033[96m→ Running findomain...\033[0m")
-            result = self.run_command(f"findomain -t {self.domain} -q 2>/dev/null")
-            if result:
-                subs = [s.strip() for s in result.split('\n') if s.strip()]
-                subdomains.update(subs)
-                print(f"      \033[92m✓ Found {len(subs)} subdomains\033[0m")
-        
-        subdomains = sorted([sub for sub in subdomains if sub])
-        
-        with open(self.all_subs_file, 'w') as f:
-            for sub in subdomains:
-                f.write(f"{sub}\n")
-        
-        print(f"\n\033[92m[✓] Total Unique Subdomains: {len(subdomains)}\033[0m")
-        return subdomains
-    
-    def check_takeover_subjack(self):
-        print("\n\033[94m[+] Checking with Subjack...\033[0m")
-        
-        if not os.path.exists(self.all_subs_file):
-            print("\033[91m[!] No subdomains file found\033[0m")
-            return []
-        
-        result = self.run_command(f"subjack -w {self.all_subs_file} -t 100 -timeout 30 -ssl -v 2>/dev/null")
-        
-        vulnerables = []
-        if result:
-            for line in result.split('\n'):
-                if 'Vulnerable' in line or '[Vulnerable]' in line:
-                    vulnerables.append(line.strip())
-                    print(f"    \033[91m[!] VULNERABLE: {line.strip()}\033[0m")
-        
-        if not vulnerables:
-            print("    \033[93m[-] No vulnerabilities found with subjack\033[0m")
-        
-        return vulnerables
-    
-    # ✅ FIX 2: Verify CNAME is actually dangling (not just pointing to service)
-    def verify_cname_dangling(self, subdomain, cname):
-        """Verify if the CNAME target actually resolves or is dead"""
-        try:
-            # Check if CNAME target has an A record
-            result = self.run_command(f"dig +short A {cname.rstrip('.')}")
-            if not result:
-                return True  # No A record = dangling = vulnerable
-            
-            # Also check HTTP response for error pages
-            for proto in ['https', 'http']:
-                try:
-                    resp = requests.get(
-                        f"{proto}://{subdomain}", 
-                        timeout=5, 
-                        verify=False, 
-                        allow_redirects=True
-                    )
-                    
-                    # Check for common takeover error pages
-                    error_indicators = [
-                        'nosuchbucket', 'no such app', 'there isn\'t a github pages',
-                        'site not found', 'project not found', 'unknown domain',
-                        'web site not found', 'error 404', 'domain is not configured',
-                        'the specified bucket does not exist', 'repository not found',
-                        'help center closed', 'fastly error', '404 error unknown site',
-                        'whatever you were looking for', 'not found - request id',
-                        'this uservoice subdomain', 'project doesnt exist',
-                        'sorry, this shop is currently unavailable',
-                        'the thing you were looking for is no longer here',
-                        'no settings were found', 'status page push'
-                    ]
-                    
-                    content_lower = resp.text.lower()
-                    for indicator in error_indicators:
-                        if indicator in content_lower:
-                            return True
-                    
-                    # If status is 404/503 with very small body, likely dangling
-                    if resp.status_code in [404, 503] and len(resp.text) < 500:
-                        return True
-                        
-                except:
-                    continue
-            
-            return False  # CNAME resolves fine, not dangling
-            
-        except:
-            return True  # Can't verify = treat as potentially vulnerable
-    
-    def check_cname_records(self, subdomain):
-        """Check CNAME records for potential takeover"""
-        try:
-            result = self.run_command(f"dig +short CNAME {subdomain}")
-            if result:
-                vulnerable_services = {
-                    'amazonaws.com': 'AWS S3',
-                    's3.amazonaws.com': 'AWS S3',
-                    'azurewebsites.net': 'Azure',
-                    'cloudapp.net': 'Azure',
-                    'cloudfront.net': 'AWS CloudFront',
-                    'github.io': 'GitHub Pages',
-                    'gitlab.io': 'GitLab Pages',
-                    'herokuapp.com': 'Heroku',
-                    'herokudns.com': 'Heroku',
-                    'surge.sh': 'Surge',
-                    'bitbucket.io': 'Bitbucket',
-                    'ghost.io': 'Ghost',
-                    'zendesk.com': 'Zendesk',
-                    'helpscoutdocs.com': 'HelpScout',
-                    'readme.io': 'Readme',
-                    'statuspage.io': 'StatusPage',
-                    'uservoice.com': 'UserVoice',
-                    'wordpress.com': 'WordPress',
-                    'pantheonsite.io': 'Pantheon',
-                    'netlify.app': 'Netlify',
-                    'netlify.com': 'Netlify',
-                    'cargo.site': 'Cargo',
-                    'feedpress.me': 'FeedPress',
-                    'freshdesk.com': 'Freshdesk',
-                    'shopify.com': 'Shopify',
-                    'tumblr.com': 'Tumblr',
-                    'fly.dev': 'Fly.io',
-                    'unbouncepages.com': 'Unbounce'
-                }
-                
-                cname_lower = result.lower()
-                for pattern, service in vulnerable_services.items():
-                    if pattern in cname_lower:
-                        return True, result.strip(), service
-            return False, None, None
-        except:
-            return False, None, None
-    
-    def manual_takeover_check(self, subdomains):
-        """Check CNAME records and verify if dangling"""
-        print("\n\033[94m[+] Performing CNAME Analysis...\033[0m")
-        cname_candidates = []
-        
-        # Step 1: Find subdomains with suspicious CNAMEs (fast)
-        print("    \033[96m→ Resolving CNAME records...\033[0m")
-        with ThreadPoolExecutor(max_workers=30) as executor:
-            futures = {executor.submit(self.check_cname_records, sub): sub 
-                      for sub in subdomains}
-            
-            for future in as_completed(futures):
-                subdomain = futures[future]
-                try:
-                    is_suspicious, cname, service = future.result()
-                    if is_suspicious:
-                        cname_candidates.append((subdomain, cname, service))
-                        print(f"    \033[93m[~] Suspicious CNAME: {subdomain}\033[0m")
-                        print(f"        \033[93m→ {cname} ({service})\033[0m")
-                except:
-                    pass
-        
-        if not cname_candidates:
-            print("    \033[93m[-] No suspicious CNAME records found\033[0m")
-            return []
-        
-        # ✅ Step 2: Verify which ones are actually dangling (important!)
-        print(f"\n    \033[96m→ Verifying {len(cname_candidates)} candidates for dangling records...\033[0m")
-        confirmed_vulns = []
-        
-        for subdomain, cname, service in cname_candidates:
-            is_dangling = self.verify_cname_dangling(subdomain, cname)
-            if is_dangling:
-                vuln_info = f"{subdomain} → CNAME: {cname} ({service}) [DANGLING]"
-                confirmed_vulns.append(vuln_info)
-                print(f"    \033[91m[!] CONFIRMED TAKEOVER: {subdomain}\033[0m")
-                print(f"        \033[91mCNAME: {cname}\033[0m")
-                print(f"        \033[91mService: {service}\033[0m")
-            else:
-                print(f"    \033[92m[✓] Safe (resolves): {subdomain}\033[0m")
-        
-        if not confirmed_vulns:
-            print("    \033[92m[✓] All CNAMEs are resolving properly - no dangling records\033[0m")
-        
-        return confirmed_vulns
-    
-    def check_http_fingerprints(self, subdomain):
-        """Check HTTP response for takeover fingerprints"""
-        fingerprints = {
-            'GitHub Pages': ['there isn\'t a github pages site here', 'site not found · github pages'],
-            'Heroku': ['no such app', 'no-such-app', 'herokucdn.com/error-pages/no-such-app'],
-            'AWS S3': ['nosuchbucket', 'the specified bucket does not exist'],
-            'Shopify': ['sorry, this shop is currently unavailable', 'only one step left'],
-            'Tumblr': ['whatever you were looking for doesn\'t currently exist'],
-            'Ghost': ['the thing you were looking for is no longer here'],
-            'Surge': ['project not found'],
-            'Azure': ['404 web site not found', 'error 404 - web app not found'],
-            'Bitbucket': ['repository not found'],
-            'Smartling': ['domain is not configured'],
-            'Acquia': ['web site not found'],
-            'Fastly': ['fastly error: unknown domain'],
-            'Pantheon': ['404 error unknown site!'],
-            'Zendesk': ['help center closed'],
-            'Readme.io': ['project doesnt exist'],
-            'StatusPage': ['status page push was not enabled', 'you are being redirected'],
-            'HelpScout': ['no settings were found for this company'],
-            'Cargo': ['if you\'re moving your domain away from cargo'],
-            'Feedpress': ['the feed has not been found'],
-            'Freshdesk': ['may be this is still fresh'],
-            'UserVoice': ['this uservoice subdomain is currently available'],
-            'Netlify': ['not found - request id'],
-            'Fly.io': ['404 not found'],
-            'Unbounce': ['the requested url was not found']
-        }
-        
-        for proto in ['http', 'https']:
-            try:
-                response = requests.get(
-                    f"{proto}://{subdomain}", 
-                    timeout=8, 
-                    verify=False, 
-                    allow_redirects=True,
-                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'}
-                )
-                content = response.text.lower()
-                
-                for service, patterns in fingerprints.items():
-                    for pattern in patterns:
-                        if pattern in content:
-                            return True, service
-            except requests.exceptions.ConnectionError:
-                continue
-            except requests.exceptions.Timeout:
-                continue
-            except:
-                continue
-        
-        return False, None
-    
-    def http_fingerprint_scan(self, subdomains):
-        """Scan HTTP fingerprints"""
-        print("\n\033[94m[+] Scanning HTTP Fingerprints...\033[0m")
-        http_vulns = []
-        
-        scan_list = subdomains[:150] if len(subdomains) > 150 else subdomains
-        total = len(scan_list)
-        done = 0
-        
-        with ThreadPoolExecutor(max_workers=15) as executor:
-            futures = {executor.submit(self.check_http_fingerprints, sub): sub 
-                      for sub in scan_list}
-            
-            for future in as_completed(futures):
-                subdomain = futures[future]
-                done += 1
-                
-                # ✅ Progress indicator
-                sys.stdout.write(f"\r    \033[96m→ Progress: {done}/{total} subdomains checked\033[0m")
-                sys.stdout.flush()
-                
-                try:
-                    is_vuln, service = future.result()
-                    if is_vuln:
-                        vuln_info = f"{subdomain} → Service: {service} [HTTP FINGERPRINT]"
-                        http_vulns.append(vuln_info)
-                        print(f"\n    \033[91m[!] Takeover Fingerprint: {subdomain}\033[0m")
-                        print(f"        \033[91mService: {service}\033[0m")
-                except:
-                    pass
-        
-        print()  # New line after progress
-        
-        if not http_vulns:
-            print("    \033[93m[-] No HTTP fingerprints found\033[0m")
-        
-        return http_vulns
-    
-    def send_discord_notification(self, vulnerables):
-        """Send to Discord webhook using requests (like curl)"""
-        pass
-    
-    def save_results(self):
-        if self.vulnerables:
-            with open(self.takeover_file, 'w') as f:
-                f.write(f"{'='*60}\n")
-                f.write(f"  SUBDOMAIN TAKEOVER REPORT\n")
-                f.write(f"{'='*60}\n")
-                f.write(f"  Domain    : {self.domain}\n")
-                f.write(f"  Date      : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"  Total     : {len(self.vulnerables)} vulnerabilities\n")
-                f.write(f"{'='*60}\n\n")
-                
-                for i, vuln in enumerate(self.vulnerables, 1):
-                    f.write(f"  {i}. {vuln}\n")
-                
-                f.write(f"\n{'='*60}\n")
-            
-            print(f"\033[92m[✓] Results saved to: {self.takeover_file}\033[0m")
-    
-    def run(self):
-        self.print_banner()
-        self.get_domain_input()
-        
-        # Check tools
-        print("\033[94m[*] Checking required tools...\033[0m")
-        required = ['subfinder']
-        optional = ['subjack', 'assetfinder', 'amass', 'findomain']
-        missing_required = []
-        
-        for tool in required:
-            if self.tool_exists(tool):
-                print(f"    \033[92m✓ {tool} found\033[0m")
-            else:
-                missing_required.append(tool)
-                print(f"    \033[91m✗ {tool} NOT FOUND (required)\033[0m")
-        
-        for tool in optional:
-            if self.tool_exists(tool):
-                print(f"    \033[92m✓ {tool} found\033[0m")
-            else:
-                print(f"    \033[93m- {tool} not found (optional)\033[0m")
-        
-        if missing_required:
-            print(f"\n\033[91m[!] Missing required tools: {', '.join(missing_required)}\033[0m")
-            print("\n\033[93mInstall:\033[0m")
-            print("  \033[96mgo install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest\033[0m")
-            sys.exit(1)
-        
-        print("\n" + "="*60)
-        
-        # Step 1: Find subdomains
-        subdomains = self.find_subdomains()
-        
-        if not subdomains:
-            print(f"\n\033[91m[!] No subdomains found for {self.domain}\033[0m")
-            return
-        
-        print("\n" + "="*60)
-        
-        # Step 2: Subjack check (if available)
-        if self.tool_exists("subjack"):
-            subjack_vulns = self.check_takeover_subjack()
-            if subjack_vulns:
-                self.vulnerables.extend(subjack_vulns)
-        else:
-            print("\n\033[93m[*] Skipping subjack (not installed)\033[0m")
-        
-        # Step 3: CNAME analysis with verification
-        manual_vulns = self.manual_takeover_check(subdomains)
-        if manual_vulns:
-            self.vulnerables.extend(manual_vulns)
-        
-        # Step 4: HTTP fingerprints
-        http_vulns = self.http_fingerprint_scan(subdomains)
-        if http_vulns:
-            self.vulnerables.extend(http_vulns)
-        
-        # Remove duplicates
-        self.vulnerables = list(set(self.vulnerables))
-        
-        # Results
-        print("\n" + "="*60)
-        if self.vulnerables:
-            print(f"\033[91m")
-            print(f"  ██████╗ FOUND {len(self.vulnerables)} TAKEOVER(S)!")
-            print(f"  ██╔═══╝ Domain: {self.domain}")
-            print(f"  ██████╗ Status: CRITICAL")
-            print(f"  ╚═══██║")
-            print(f"  ██████║")
-            print(f"  ╚═════╝\033[0m")
-            print("="*60)
-            
-            for i, vuln in enumerate(self.vulnerables, 1):
-                print(f"\033[91m  {i}. {vuln}\033[0m")
-            
-            print("="*60)
-            
-            self.save_results()
-            # self.send_discord_notification(self.vulnerables)
-            
-            print(f"\n\033[91m[⚠] IMMEDIATE ACTION REQUIRED!\033[0m")
-            print(f"\033[93m    These subdomains can be claimed by attackers.\033[0m")
-            
-        else:
-            print(f"\033[92m[✓] No subdomain takeover vulnerabilities found\033[0m")
-            print(f"\033[92m[✓] {self.domain} appears to be secure\033[0m")
-        
-        print(f"\n{'='*60}")
-        print(f"\033[92m[✓] Scan completed at {datetime.now().strftime('%H:%M:%S')}\033[0m\n")
-        
-        # Cleanup
-        if os.path.exists(self.all_subs_file):
-            os.remove(self.all_subs_file)
+# ─────────────────────────────────────────────
+#  Banner
+# ─────────────────────────────────────────────
+def print_banner():
+    banner = f"""
+{CYAN}{BOLD}
+  ████████╗███████╗██╗  ██╗ █████╗ ███╗   ██╗ ██████╗  ██████╗ ███████╗
+  ╚══██╔══╝██╔════╝██║  ██║██╔══██╗████╗  ██║██╔════╝ ██╔═████╗╚════██║
+     ██║   █████╗  ███████║███████║██╔██╗ ██║██║  ███╗██║██╔██║    ██╔╝
+     ██║   ██╔══╝  ██╔══██║██╔══██║██║╚██╗██║██║   ██║████╔╝██║   ██╔╝ 
+     ██║   ███████╗██║  ██║██║  ██║██║ ╚████║╚██████╔╝╚██████╔╝   ██║  
+     ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝  ╚═════╝   ╚═╝  
+{RESET}
+{MAGENTA}{BOLD}
+  ███████╗██╗   ██╗██████╗ ████████╗ █████╗ ██╗  ██╗███████╗ ██████╗ ██╗  ██╗
+  ██╔════╝██║   ██║██╔══██╗╚══██╔══╝██╔══██╗██║ ██╔╝██╔════╝██╔═████╗╚██╗██╔╝
+  ███████╗██║   ██║██████╔╝   ██║   ███████║█████╔╝ █████╗  ██║██╔██║ ╚███╔╝ 
+  ╚════██║██║   ██║██╔══██╗   ██║   ██╔══██║██╔═██╗ ██╔══╝  ████╔╝██║ ██╔██╗ 
+  ███████║╚██████╔╝██████╔╝   ██║   ██║  ██║██║  ██╗███████╗╚██████╔╝██╔╝ ██╗
+  ╚══════╝ ╚═════╝ ╚═════╝    ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝
+{RESET}
+{YELLOW}{'─'*78}
+{BOLD}  Subdomain Takeover Detection Tool
+{RESET}{YELLOW}  Owner  : {CYAN}{BOLD}TehanG07{RESET}
+{YELLOW}  Purpose: Detect dangling DNS records vulnerable to subdomain takeover
+{YELLOW}  Source  : github.com/edoverflow/can-i-take-over-xyz
+{YELLOW}{'─'*78}{RESET}
+"""
+    print(banner)
 
-def main():
+# ─────────────────────────────────────────────
+#  Fetch fingerprint database from GitHub
+# ─────────────────────────────────────────────
+FINGERPRINTS_URL = "https://raw.githubusercontent.com/EdOverflow/can-i-take-over-xyz/master/fingerprints.json"
+
+def fetch_fingerprints():
+    print(f"{CYAN}[*]{RESET} Fetching fingerprint database from EdOverflow/can-i-take-over-xyz ...")
     try:
-        hunter = SubdomainTakeoverHunter()
-        hunter.run()
-    except KeyboardInterrupt:
-        print("\n\n\033[93m[!] Scan interrupted by user\033[0m")
-        sys.exit(0)
+        req = urllib.request.Request(FINGERPRINTS_URL, headers={"User-Agent": "SubTakeoverScanner/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+        print(f"{GREEN}[+]{RESET} Loaded {BOLD}{len(data)}{RESET} service fingerprints.\n")
+        return data
     except Exception as e:
-        print(f"\n\033[91m[!] Unexpected error: {e}\033[0m")
+        print(f"{YELLOW}[!]{RESET} Could not fetch fingerprints: {e}")
+        print(f"{YELLOW}[!]{RESET} Continuing with CNAME-only detection (no fingerprint matching).\n")
+        return []
+
+# ─────────────────────────────────────────────
+#  Check dependencies
+# ─────────────────────────────────────────────
+def check_tool(name):
+    result = subprocess.run(["which", name], capture_output=True, text=True)
+    return result.returncode == 0
+
+def check_dependencies():
+    missing = []
+    for tool in ["subfinder", "httpx", "nslookup", "curl"]:
+        if not check_tool(tool):
+            missing.append(tool)
+    if missing:
+        print(f"{RED}[!]{RESET} Missing tools: {', '.join(missing)}")
+        print(f"{YELLOW}    Install guides:{RESET}")
+        if "subfinder" in missing:
+            print(f"      subfinder : go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest")
+        if "httpx" in missing:
+            print(f"      httpx     : go install github.com/projectdiscovery/httpx/cmd/httpx@latest")
         sys.exit(1)
+    print(f"{GREEN}[+]{RESET} All dependencies found.\n")
+
+# ─────────────────────────────────────────────
+#  Step 1: Subdomain enumeration
+# ─────────────────────────────────────────────
+def enumerate_subdomains(domain):
+    print(f"{CYAN}[*]{RESET} {BOLD}Step 1:{RESET} Enumerating subdomains for {BOLD}{domain}{RESET} using subfinder ...")
+    cmd = ["subfinder", "-d", domain, "-silent"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    subs = [s.strip() for s in result.stdout.splitlines() if s.strip()]
+    with open("sub.txt", "w") as f:
+        f.write("\n".join(subs))
+    print(f"{GREEN}[+]{RESET} Found {BOLD}{len(subs)}{RESET} subdomains → saved to {BOLD}sub.txt{RESET}\n")
+    return subs
+
+# ─────────────────────────────────────────────
+#  Step 2: Find dead subdomains via httpx
+# ─────────────────────────────────────────────
+def find_dead_subdomains():
+    print(f"{CYAN}[*]{RESET} {BOLD}Step 2:{RESET} Probing subdomains for HTTP 404 responses using httpx ...")
+    if not os.path.exists("sub.txt") or os.path.getsize("sub.txt") == 0:
+        print(f"{YELLOW}[!]{RESET} sub.txt is empty. No subdomains to probe.\n")
+        return []
+
+    cmd = ["httpx", "-l", "sub.txt", "-mc", "404", "-silent"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    dead = [s.strip() for s in result.stdout.splitlines() if s.strip()]
+
+    # Strip http:// or https:// for nslookup
+    dead_clean = []
+    for d in dead:
+        d = re.sub(r'^https?://', '', d).rstrip('/')
+        dead_clean.append(d)
+
+    with open("dead.txt", "w") as f:
+        f.write("\n".join(dead_clean))
+
+    print(f"{GREEN}[+]{RESET} Found {BOLD}{len(dead_clean)}{RESET} dead subdomains (404) → saved to {BOLD}dead.txt{RESET}\n")
+    return dead_clean
+
+# ─────────────────────────────────────────────
+#  Step 3: nslookup CNAME check
+# ─────────────────────────────────────────────
+def extract_cname(subdomain):
+    """Run nslookup and extract CNAME/canonical name if present."""
+    result = subprocess.run(["nslookup", subdomain], capture_output=True, text=True)
+    output = result.stdout + result.stderr
+    cnames = []
+    for line in output.splitlines():
+        line_lower = line.lower()
+        if "canonical name" in line_lower or ("cname" in line_lower and "=" in line):
+            # Parse canonical name
+            if "=" in line:
+                cname = line.split("=")[-1].strip().rstrip(".")
+                cnames.append(cname)
+            elif "canonical name" in line_lower:
+                parts = line.split("=") if "=" in line else line.split(":")
+                if len(parts) > 1:
+                    cname = parts[-1].strip().rstrip(".")
+                    cnames.append(cname)
+    return cnames, output
+
+# ─────────────────────────────────────────────
+#  Step 4: Fingerprint matching
+# ─────────────────────────────────────────────
+def match_fingerprint(subdomain, cnames, fingerprints):
+    """Try to match CNAME against known vulnerable service fingerprints."""
+    matches = []
+    for fp in fingerprints:
+        service   = fp.get("service", "Unknown")
+        cname_pat = fp.get("cname", [])
+        fingerprt = fp.get("fingerprint", "")
+        vulnerable = fp.get("vulnerable", False)
+        status    = fp.get("status", "")
+
+        if isinstance(cname_pat, str):
+            cname_pat = [cname_pat]
+
+        # Check if any CNAME matches a known service pattern
+        for cn in cnames:
+            for pat in cname_pat:
+                if pat and pat.lower() in cn.lower():
+                    matches.append({
+                        "service": service,
+                        "cname": cn,
+                        "pattern": pat,
+                        "fingerprint": fingerprt,
+                        "vulnerable": vulnerable,
+                        "status": status
+                    })
+    return matches
+
+def curl_fingerprint_check(subdomain, fingerprint_string):
+    """Use curl to fetch the subdomain and check if fingerprint string is present."""
+    if not fingerprint_string:
+        return False, ""
+    try:
+        result = subprocess.run(
+            ["curl", "-sk", "--max-time", "8", "-L", f"http://{subdomain}"],
+            capture_output=True, text=True
+        )
+        body = result.stdout
+        if fingerprint_string.lower() in body.lower():
+            return True, body[:300]
+        return False, body[:300]
+    except Exception:
+        return False, ""
+
+# ─────────────────────────────────────────────
+#  Main scan logic
+# ─────────────────────────────────────────────
+def scan(dead_subdomains, fingerprints):
+    print(f"{CYAN}[*]{RESET} {BOLD}Step 3:{RESET} Running nslookup + fingerprint checks on {len(dead_subdomains)} dead subdomains ...\n")
+    print(f"{'─'*78}")
+
+    vulnerable_results = []
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    for sub in dead_subdomains:
+        print(f"{DIM}  [~] Checking: {sub}{RESET}", end=" ... ", flush=True)
+
+        cnames, raw_nslookup = extract_cname(sub)
+
+        if not cnames:
+            print(f"{DIM}no CNAME{RESET}")
+            continue
+
+        print(f"\n{YELLOW}  [CNAME]{RESET} {sub} → {', '.join(cnames)}")
+
+        # Match fingerprints
+        matches = match_fingerprint(sub, cnames, fingerprints) if fingerprints else []
+
+        if not matches:
+            # Still has CNAME but no known fingerprint — worth noting
+            entry = {
+                "subdomain": sub,
+                "cnames": cnames,
+                "service": "Unknown",
+                "fingerprint_matched": False,
+                "vulnerable": "Unknown",
+                "note": "CNAME detected but no fingerprint match"
+            }
+            vulnerable_results.append(entry)
+            print(f"{YELLOW}  [?] CNAME found but no service fingerprint matched. May still be vulnerable.{RESET}")
+            continue
+
+        for m in matches:
+            # Curl check for fingerprint string on the page
+            fp_matched, curl_body = curl_fingerprint_check(sub, m["fingerprint"])
+
+            vuln_flag = m["vulnerable"] and fp_matched
+
+            entry = {
+                "subdomain": sub,
+                "cnames": cnames,
+                "service": m["service"],
+                "cname_pattern": m["pattern"],
+                "fingerprint": m["fingerprint"],
+                "fingerprint_matched": fp_matched,
+                "vulnerable": vuln_flag,
+                "status": m["status"]
+            }
+            vulnerable_results.append(entry)
+
+            if vuln_flag:
+                print(f"\n{RED}{BOLD}  ╔══════════════════════════════════════════════════════════╗")
+                print(f"  ║  ⚠  VULNERABLE: {sub:<42}║")
+                print(f"  ║  Service  : {m['service']:<46}║")
+                print(f"  ║  CNAME    : {cnames[0][:46]:<46}║")
+                print(f"  ║  FP Match : {'YES':<46}║")
+                print(f"  ║  Status   : {m['status'][:46]:<46}║")
+                print(f"  ╚══════════════════════════════════════════════════════════╝{RESET}\n")
+            elif m["vulnerable"] and not fp_matched:
+                print(f"{YELLOW}  [~] Possible ({m['service']}): CNAME matches but fingerprint NOT found on page.{RESET}")
+            else:
+                print(f"{GREEN}  [✓] {m['service']}: CNAME matched but service marked NOT vulnerable.{RESET}")
+
+    print(f"\n{'─'*78}")
+    return vulnerable_results, timestamp
+
+# ─────────────────────────────────────────────
+#  Save results
+# ─────────────────────────────────────────────
+def save_results(results, timestamp):
+    confirmed    = [r for r in results if r.get("vulnerable") is True]
+    possible     = [r for r in results if r.get("vulnerable") == "Unknown"]
+    not_vuln_fp  = [r for r in results if r.get("vulnerable") is False and r.get("fingerprint_matched") is False]
+
+    outfile = f"vulnerable_{timestamp}.txt"
+    with open(outfile, "w") as f:
+        f.write(f"SubTakeover Scan Results — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("Owner: TehanG07\n")
+        f.write("="*70 + "\n\n")
+
+        f.write(f"CONFIRMED VULNERABLE ({len(confirmed)})\n")
+        f.write("-"*50 + "\n")
+        for r in confirmed:
+            f.write(f"[VULNERABLE] {r['subdomain']}\n")
+            f.write(f"  Service     : {r['service']}\n")
+            f.write(f"  CNAME       : {', '.join(r['cnames'])}\n")
+            f.write(f"  FP Matched  : Yes\n")
+            f.write(f"  Status      : {r.get('status','')}\n\n")
+
+        f.write(f"\nPOSSIBLE (CNAME found, no fingerprint match) ({len(possible)})\n")
+        f.write("-"*50 + "\n")
+        for r in possible:
+            f.write(f"[POSSIBLE] {r['subdomain']}\n")
+            f.write(f"  CNAME  : {', '.join(r['cnames'])}\n\n")
+
+        f.write(f"\nCNAME MATCH BUT FINGERPRINT NOT ON PAGE ({len(not_vuln_fp)})\n")
+        f.write("-"*50 + "\n")
+        for r in not_vuln_fp:
+            f.write(f"[FP-MISS] {r['subdomain']}\n")
+            f.write(f"  Service : {r['service']}\n")
+            f.write(f"  CNAME   : {', '.join(r['cnames'])}\n\n")
+
+    print(f"\n{GREEN}[+]{RESET} Results saved to {BOLD}{outfile}{RESET}")
+    return outfile, len(confirmed), len(possible)
+
+# ─────────────────────────────────────────────
+#  Entry point
+# ─────────────────────────────────────────────
+def main():
+    print_banner()
+    check_dependencies()
+
+    # Fetch fingerprint DB
+    fingerprints = fetch_fingerprints()
+
+    # Ask for domain
+    print(f"{CYAN}{BOLD}Enter target domain{RESET} (e.g. example.com): ", end="")
+    domain = input().strip()
+    if not domain:
+        print(f"{RED}[!]{RESET} No domain provided. Exiting.")
+        sys.exit(1)
+    print()
+
+    # Pipeline
+    enumerate_subdomains(domain)
+    dead = find_dead_subdomains()
+
+    if not dead:
+        print(f"{YELLOW}[!]{RESET} No dead subdomains found. Nothing to check.\n")
+        sys.exit(0)
+
+    results, ts = scan(dead, fingerprints)
+    outfile, n_vuln, n_possible = save_results(results, ts)
+
+    # Summary
+    print(f"\n{CYAN}{BOLD}  ┌─ Scan Summary ──────────────────────────────────────┐{RESET}")
+    print(f"{CYAN}{BOLD}  │{RESET}  Target          : {BOLD}{domain}{RESET}")
+    print(f"{CYAN}{BOLD}  │{RESET}  Dead subdomains : {BOLD}{len(dead)}{RESET}")
+    print(f"{CYAN}{BOLD}  │{RESET}  {RED}{BOLD}Confirmed vuln  : {n_vuln}{RESET}")
+    print(f"{CYAN}{BOLD}  │{RESET}  {YELLOW}Possible vuln   : {n_possible}{RESET}")
+    print(f"{CYAN}{BOLD}  │{RESET}  Output file     : {BOLD}{outfile}{RESET}")
+    print(f"{CYAN}{BOLD}  └────────────────────────────────────────────────────┘{RESET}\n")
 
 if __name__ == "__main__":
     main()
